@@ -1,20 +1,21 @@
 """
-MyScript OCR для reMarkable - работа с векторными данными напрямую.
+MyScript OCR for reMarkable - working with vector data directly.
 
-Этот модуль интегрирует MyScript Cloud API для распознавания рукописного текста
-из reMarkable, работая напрямую с векторными штрихами вместо конвертации в PNG.
+This module integrates MyScript Cloud API for handwriting recognition
+from reMarkable, working directly with vector strokes instead of PNG conversion.
 
-Преимущества MyScript:
-- Лучшее качество распознавания русского рукописного текста
-- Работа с векторными данными (не нужно конвертировать в изображения)
-- Поддержка множества языков
+Advantages of MyScript:
+- Excellent handwriting recognition quality (especially for non-Latin scripts)
+- Works with vector data (no image conversion needed)
+- Multi-language support
 
-Настройка:
-- MYSCRIPT_APP_KEY: Application Key от MyScript
-- MYSCRIPT_HMAC_KEY: HMAC Key от MyScript
-- REMARKABLE_OCR_BACKEND=myscript: Активация MyScript как бэкенда OCR
+Configuration:
+- MYSCRIPT_APP_KEY: Application Key from MyScript
+- MYSCRIPT_HMAC_KEY: HMAC Key from MyScript
+- REMARKABLE_OCR_BACKEND=myscript: Enable MyScript as OCR backend
+- MYSCRIPT_LANGUAGE: Language code (ru, en, de, fr, es, it, pt, zh, ja, ko)
 
-Получить ключи: https://developer.myscript.com/
+Get API keys: https://developer.myscript.com/
 """
 
 import hashlib
@@ -32,7 +33,7 @@ import requests
 
 
 class LanguageCode(str, Enum):
-    """Коды языков для MyScript API."""
+    """Language codes for MyScript API."""
 
     RU = "ru_RU"
     EN = "en_US"
@@ -47,7 +48,7 @@ class LanguageCode(str, Enum):
 
 
 class PointerType(str, Enum):
-    """Типы указателей."""
+    """Pointer types for MyScript API."""
 
     PEN = "PEN"
     TOUCH = "TOUCH"
@@ -56,18 +57,18 @@ class PointerType(str, Enum):
 
 @dataclass
 class Stroke:
-    """Один штрих рукописного текста."""
+    """A single handwriting stroke."""
 
     x: List[int]
     y: List[int]
-    t: List[int]  # timestamps в миллисекундах
+    t: List[int]  # timestamps in milliseconds
     p: List[float]  # pressure (0.0-1.0)
     pointer_type: PointerType = PointerType.PEN
     pointer_id: int = -1
     id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Конвертация в формат MyScript API."""
+        """Convert to MyScript API format."""
         result = {
             "x": self.x,
             "y": self.y,
@@ -85,7 +86,7 @@ class Stroke:
 
 @dataclass
 class StrokeGroup:
-    """Группа штрихов."""
+    """A group of strokes with shared pen style."""
 
     strokes: List[Stroke]
     pen_style: str = "color: #000000; -myscript-pen-width: ;"
@@ -96,7 +97,7 @@ class StrokeGroup:
 
 @dataclass
 class MyScriptRequest:
-    """Запрос к MyScript API."""
+    """Request payload for MyScript API."""
 
     width: int = 1872  # reMarkable 2 width
     height: int = 1404  # reMarkable 2 height
@@ -112,7 +113,7 @@ class MyScriptRequest:
             self.stroke_groups = []
 
     def to_dict(self) -> Dict[str, Any]:
-        """Конвертация в формат MyScript API."""
+        """Convert to MyScript API format."""
         return {
             "width": self.width,
             "height": self.height,
@@ -146,11 +147,11 @@ class MyScriptRequest:
 
 
 class MyScriptOCR:
-    """Клиент для работы с MyScript Cloud API."""
+    """Client for MyScript Cloud API."""
 
     BATCH_ENDPOINT = "/api/v4.0/iink/batch"
     BASE_URL = "https://cloud.myscript.com"
-    FREE_TIER_LIMIT = 2000  # Бесплатный лимит: 2000 запросов в месяц
+    FREE_TIER_LIMIT = 2000  # Free tier limit: 2000 requests per month
 
     def __init__(
         self,
@@ -158,11 +159,11 @@ class MyScriptOCR:
         hmac_key: Optional[str] = None,
     ):
         """
-        Инициализация клиента MyScript.
+        Initialize MyScript client.
 
         Args:
-            app_key: Application Key от MyScript (или MYSCRIPT_APP_KEY env var)
-            hmac_key: HMAC Key от MyScript (или MYSCRIPT_HMAC_KEY env var)
+            app_key: Application Key from MyScript (or MYSCRIPT_APP_KEY env var)
+            hmac_key: HMAC Key from MyScript (or MYSCRIPT_HMAC_KEY env var)
         """
         self.app_key = app_key or os.environ.get("MYSCRIPT_APP_KEY")
         self.hmac_key = hmac_key or os.environ.get("MYSCRIPT_HMAC_KEY")
@@ -177,13 +178,13 @@ class MyScriptOCR:
 
     def _compute_hmac(self, data: bytes) -> str:
         """
-        Вычисление HMAC подписи для запроса.
+        Compute HMAC signature for request.
 
         Args:
-            data: JSON payload в виде bytes
+            data: JSON payload as bytes
 
         Returns:
-            HMAC подпись в hex формате
+            HMAC signature in hex format
         """
         # User key = app_key + hmac_key
         key = (self.app_key + self.hmac_key).encode("utf-8")
@@ -193,25 +194,25 @@ class MyScriptOCR:
 
     def recognize(self, request: MyScriptRequest) -> Dict[str, Any]:
         """
-        Распознавание рукописного текста через MyScript API.
+        Recognize handwriting via MyScript API.
 
         Args:
-            request: Запрос с векторными данными
+            request: Request with vector stroke data
 
         Returns:
-            Результат распознавания с полем "label" (распознанный текст)
+            Recognition result with "label" field (recognized text)
         """
-        # Конвертируем запрос в JSON
+        # Convert request to JSON
         payload_dict = request.to_dict()
         payload_bytes = json.dumps(payload_dict, separators=(",", ":")).encode("utf-8")
 
-        # Вычисляем HMAC
+        # Compute HMAC signature
         hmac_signature = self._compute_hmac(payload_bytes)
 
-        # Формируем URL
+        # Build URL
         url = f"{self.BASE_URL}{self.BATCH_ENDPOINT}"
 
-        # Формируем заголовки
+        # Build headers
         headers = {
             "applicationKey": self.app_key,
             "hmac": hmac_signature,
@@ -219,7 +220,7 @@ class MyScriptOCR:
             "Accept": "application/json, application/vnd.myscript.jiix",
         }
 
-        # Отправляем запрос (увеличенный таймаут для больших документов)
+        # Send request (increased timeout for large documents)
         response = self.session.post(url, data=payload_bytes, headers=headers, timeout=180)
         response.raise_for_status()
 
@@ -227,13 +228,13 @@ class MyScriptOCR:
 
     def recognize_text(self, request: MyScriptRequest) -> str:
         """
-        Распознавание текста с возвратом только текста.
+        Recognize handwriting and return text only.
 
         Args:
-            request: Запрос с векторными данными
+            request: Request with vector stroke data
 
         Returns:
-            Распознанный текст
+            Recognized text
         """
         result = self.recognize(request)
         return result.get("label", "")
@@ -244,14 +245,14 @@ def convert_rm_strokes_to_myscript(
     time_offset: int = 0,
 ) -> List[StrokeGroup]:
     """
-    Конвертация штрихов из формата reMarkable в формат MyScript.
+    Convert strokes from reMarkable format to MyScript format.
 
     Args:
-        rm_strokes: Список штрихов из reMarkable (формат rmscene)
-        time_offset: Начальное смещение времени в миллисекундах
+        rm_strokes: List of strokes from reMarkable (rmscene format)
+        time_offset: Initial time offset in milliseconds
 
     Returns:
-        Список групп штрихов для MyScript
+        List of stroke groups for MyScript API
     """
     stroke_groups = []
     current_group = StrokeGroup(strokes=[])
@@ -263,12 +264,12 @@ def convert_rm_strokes_to_myscript(
     t = time_offset
 
     for rm_stroke in rm_strokes:
-        # Пропускаем ластики и маркеры
+        # Skip erasers and highlighters - they don't contain handwriting
         brush_type = rm_stroke.get("brushType", 0)
         if brush_type in [1, 2, 3, 4]:  # Eraser, EraseArea, Highlighter, HighlighterV5
             continue
 
-        # Конвертируем точки
+        # Convert points
         dots = rm_stroke.get("dots", [])
         if not dots:
             continue
@@ -284,7 +285,7 @@ def convert_rm_strokes_to_myscript(
             x1 = int(round(dot.get("x", 0)))
             y1 = int(round(dot.get("y", 0)))
 
-            # Избегаем дубликатов точек
+            # Skip duplicate points
             if x0 == x1 and y0 == y1:
                 continue
 
@@ -318,13 +319,13 @@ def convert_rm_strokes_to_myscript(
 
 def parse_rm_file_v6(rm_data: bytes) -> Dict[str, Any]:
     """
-    Парсит .rm файл версии 6 используя rmscene.
+    Parse .rm file version 6 using rmscene library.
 
     Args:
-        rm_data: Содержимое .rm файла
+        rm_data: Contents of .rm file
 
     Returns:
-        Словарь с данными штрихов
+        Dictionary with stroke data
     """
     import rmscene
 
@@ -335,23 +336,23 @@ def parse_rm_file_v6(rm_data: bytes) -> Dict[str, Any]:
     tree = rmscene.read_tree(BytesIO(rm_data))
 
     for node in tree.walk():
-        # Проверяем, что это узел типа Line с точками
+        # Check if this is a Line node with points
         if hasattr(node, "points") and node.points:
             points = node.points
             dots = []
             for p in points:
-                # Проверяем на NaN и извлекаем координаты
+                # Check for NaN and extract coordinates
                 x_val = float(p.x) if hasattr(p, "x") and not (p.x != p.x) else 0.0
                 y_val = float(p.y) if hasattr(p, "y") and not (p.y != p.y) else 0.0
 
-                # Pressure в rmscene обычно от 0 до 255, нормализуем до 0.0-1.0
+                # Pressure in rmscene is typically 0-255, normalize to 0.0-1.0
                 pressure_val = 0.5
                 if hasattr(p, "pressure"):
                     pressure_raw = float(p.pressure)
                     if pressure_raw > 0:
                         pressure_val = min(1.0, max(0.0, pressure_raw / 255.0))
 
-                # Speed может быть 0 или больше
+                # Speed can be 0 or greater
                 speed_val = float(p.speed) if hasattr(p, "speed") else 1.0
 
                 dots.append(
@@ -365,18 +366,25 @@ def parse_rm_file_v6(rm_data: bytes) -> Dict[str, Any]:
                 )
 
             if dots:
-                # Определяем тип кисти по tool
+                # Determine brush type from rmscene tool enum
+                # rmscene Pen values:
+                #   0: PAINTBRUSH_1, 1: PENCIL_1, 2: BALLPOINT_1, 3: MARKER_1
+                #   4: FINELINER_1, 5: HIGHLIGHTER_1, 6: ERASER, 7: MECHANICAL_PENCIL_1
+                #   8: ERASER_AREA, 12: PAINTBRUSH_2, 13: MECHANICAL_PENCIL_2
+                #   14: PENCIL_2, 15: BALLPOINT_2, 16: MARKER_2, 17: FINELINER_2
+                #   18: HIGHLIGHTER_2, 21: CALIGRAPHY, 23: SHADER
                 tool = getattr(node, "tool", None)
-                brush_type = 0  # По умолчанию обычная ручка
+                brush_type = 0  # Default: regular pen (will be recognized)
 
                 if tool is not None:
                     tool_val = int(tool) if isinstance(tool, (int, float)) else 0
-                    if tool_val >= 5:
-                        brush_type = 6  # Eraser
-                    elif tool_val >= 3:
-                        brush_type = 5  # Highlighter
+                    # Mark erasers and highlighters for filtering
+                    if tool_val in (6, 8):  # ERASER, ERASER_AREA
+                        brush_type = 1  # Will be filtered out
+                    elif tool_val in (5, 18):  # HIGHLIGHTER_1, HIGHLIGHTER_2
+                        brush_type = 3  # Will be filtered out
                     else:
-                        brush_type = 0  # Pen
+                        brush_type = 0  # Pen/Pencil/Marker - recognize
 
                 all_strokes.append({"dots": dots, "brushType": brush_type})
 
@@ -390,17 +398,17 @@ def parse_rm_file_v6(rm_data: bytes) -> Dict[str, Any]:
 
 def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
     """
-    Парсит .rm файл и извлекает векторные данные.
+    Parse .rm file and extract vector data.
 
-    Поддерживает форматы v3, v5 и v6.
+    Supports formats v3, v5, and v6.
 
     Args:
-        rm_data: Содержимое .rm файла
+        rm_data: Contents of .rm file
 
     Returns:
-        Словарь с векторными данными для конвертации в MyScript
+        Dictionary with vector data for MyScript conversion
     """
-    # Заголовки для разных версий
+    # Headers for different versions
     HEADER_V3 = b"reMarkable .lines file, version=3          "
     HEADER_V5 = b"reMarkable .lines file, version=5          "
     HEADER_V6 = b"reMarkable .lines file, version=6          "
@@ -412,7 +420,7 @@ def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
 
     pos = 0
 
-    # Читаем заголовок
+    # Read header
     header = rm_data[pos : pos + HEADER_LEN]
     pos += HEADER_LEN
 
@@ -421,24 +429,24 @@ def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
     elif header == HEADER_V5:
         version = 5
     elif header == HEADER_V6:
-        # Для v6 используем rmscene
+        # For v6 use rmscene library
         return parse_rm_file_v6(rm_data)
     else:
         raise ValueError(f"Unsupported .rm file format: {header[:30]}")
 
-    # Читаем количество слоёв
+    # Read number of layers
     n_layers = struct.unpack("<I", rm_data[pos : pos + 4])[0]
     pos += 4
 
-    # Читаем слои
+    # Read layers
     for layer_idx in range(n_layers):
-        # Количество штрихов в слое
+        # Number of strokes in layer
         n_strokes = struct.unpack("<I", rm_data[pos : pos + 4])[0]
         pos += 4
 
-        # Читаем штрихи
+        # Read strokes
         for stroke_idx in range(n_strokes):
-            # Читаем параметры штриха
+            # Read stroke parameters
             brush_type = struct.unpack("<I", rm_data[pos : pos + 4])[0]
             pos += 4
             brush_color = struct.unpack("<I", rm_data[pos : pos + 4])[0]
@@ -448,16 +456,16 @@ def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
             brush_size = struct.unpack("<f", rm_data[pos : pos + 4])[0]
             pos += 4
 
-            # Дополнительное поле для v5
+            # Additional field for v5
             if version == 5:
                 unknown = struct.unpack("<I", rm_data[pos : pos + 4])[0]
                 pos += 4
 
-            # Количество точек
+            # Number of points
             n_dots = struct.unpack("<I", rm_data[pos : pos + 4])[0]
             pos += 4
 
-            # Читаем точки
+            # Read points
             dots = []
             for dot_idx in range(n_dots):
                 x = struct.unpack("<f", rm_data[pos : pos + 4])[0]
@@ -483,7 +491,7 @@ def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
                     }
                 )
 
-            if dots:  # Добавляем только если есть точки
+            if dots:  # Only add if there are points
                 stroke_data = {"dots": dots, "brushType": int(brush_type)}
                 all_strokes.append(stroke_data)
 
@@ -497,9 +505,9 @@ def parse_rm_file(rm_data: bytes) -> Dict[str, Any]:
 
 def get_language_from_env() -> LanguageCode:
     """
-    Получает язык OCR из переменной окружения MYSCRIPT_LANGUAGE.
+    Get OCR language from MYSCRIPT_LANGUAGE environment variable.
 
-    По умолчанию возвращает русский (ru_RU).
+    Defaults to Russian (ru_RU) if not set.
     """
     lang_env = os.environ.get("MYSCRIPT_LANGUAGE", "ru").lower()
 
@@ -521,29 +529,29 @@ def get_language_from_env() -> LanguageCode:
 
 def ocr_rm_file_with_myscript(rm_data: bytes) -> Optional[str]:
     """
-    Распознает текст из .rm файла через MyScript.
+    Recognize text from .rm file using MyScript.
 
     Args:
-        rm_data: Содержимое .rm файла
+        rm_data: Contents of .rm file
 
     Returns:
-        Распознанный текст или None при ошибке
+        Recognized text or None on error
     """
     try:
-        # Парсим .rm файл
+        # Parse .rm file
         parsed_data = parse_rm_file(rm_data)
 
         strokes = parsed_data.get("strokes", [])
         if not strokes:
             return None
 
-        # Конвертируем в формат MyScript
+        # Convert to MyScript format
         stroke_groups = convert_rm_strokes_to_myscript(strokes, time_offset=0)
 
         if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
             return None
 
-        # Создаем запрос
+        # Create request
         request = MyScriptRequest(
             width=parsed_data.get("width", 1872),
             height=parsed_data.get("height", 1404),
@@ -551,11 +559,11 @@ def ocr_rm_file_with_myscript(rm_data: bytes) -> Optional[str]:
             stroke_groups=stroke_groups,
         )
 
-        # Отправляем на распознавание
+        # Send for recognition
         client = MyScriptOCR()
         result = client.recognize(request)
         return result.get("label", "")
 
     except Exception:
-        # Ошибка MyScript - вернём None, чтобы можно было использовать fallback
+        # MyScript error - return None to allow fallback
         return None
