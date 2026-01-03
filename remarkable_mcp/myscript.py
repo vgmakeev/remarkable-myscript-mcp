@@ -265,7 +265,7 @@ def convert_rm_strokes_to_myscript(
     for rm_stroke in rm_strokes:
         # Пропускаем ластики и маркеры
         brush_type = rm_stroke.get("brushType", 0)
-        if brush_type in [1, 2, 3, 4, 5, 6]:  # Eraser, EraseArea, Highlighter
+        if brush_type in [1, 2, 3, 4]:  # Eraser, EraseArea, Highlighter, HighlighterV5
             continue
 
         # Конвертируем точки
