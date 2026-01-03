@@ -887,15 +887,9 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
             backend = "tesseract"
 
     if backend == "myscript":
+        # MyScript works with vector data directly - no image rendering needed
         result = _ocr_myscript(rm_files)
-        if result is not None:
-            return (result, "myscript")
-        # Fallback to Google or Tesseract if MyScript fails
-        if os.environ.get("GOOGLE_VISION_API_KEY"):
-            result = _ocr_google_vision(rm_files)
-            return (result, "google")
-        result = _ocr_tesseract(rm_files)
-        return (result, "tesseract")
+        return (result, "myscript")
     elif backend == "google":
         result = _ocr_google_vision(rm_files)
         return (result, "google")
