@@ -847,17 +847,24 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
     Extract handwritten text using OCR.
 
     Supports multiple backends (set REMARKABLE_OCR_BACKEND env var):
+    - "myscript": MyScript Cloud API - best for handwriting, works with vector data
     - "sampling": Uses client's LLM via MCP sampling (requires async context, tools only)
-    - "google": Google Cloud Vision - best for handwriting
+    - "google": Google Cloud Vision - good for handwriting
     - "tesseract": pytesseract - basic OCR, requires rmc + cairosvg
-    - "auto" (default): Google if API key provided, else Tesseract
+    - "auto" (default): MyScript if keys provided, else Google if API key provided, else Tesseract
 
     Note: "sampling" backend requires async context and is only available via tools,
     not via MCP resources. When sampling is configured but this sync function is called
     (e.g., from resources), it falls back to the auto-detection logic.
 
+    MyScript configuration:
+    - MYSCRIPT_APP_KEY: MyScript Application Key
+    - MYSCRIPT_HMAC_KEY: MyScript HMAC Key
+    - MYSCRIPT_LANGUAGE: Language code (ru, en, de, fr, es, it, pt, zh, ja, ko). Default: ru
+
     Returns:
-        Tuple of (ocr_results, backend_used) where backend_used is "google" or "tesseract"
+        Tuple of (ocr_results, backend_used) where backend_used is one of:
+        "myscript", "google", or "tesseract"
     """
     import os
 
@@ -870,18 +877,72 @@ def extract_handwriting_ocr(rm_files: List[Path]) -> tuple[Optional[List[str]], 
 
     # Auto-detect best available backend
     if backend == "auto":
-        # Check for Google Vision API key first (simplest auth method)
-        if os.environ.get("GOOGLE_VISION_API_KEY"):
+        # Check for MyScript API keys first (best quality for handwriting)
+        if os.environ.get("MYSCRIPT_APP_KEY") and os.environ.get("MYSCRIPT_HMAC_KEY"):
+            backend = "myscript"
+        # Check for Google Vision API key next
+        elif os.environ.get("GOOGLE_VISION_API_KEY"):
             backend = "google"
         else:
             backend = "tesseract"
 
-    if backend == "google":
+    if backend == "myscript":
+        result = _ocr_myscript(rm_files)
+        if result is not None:
+            return (result, "myscript")
+        # Fallback to Google or Tesseract if MyScript fails
+        if os.environ.get("GOOGLE_VISION_API_KEY"):
+            result = _ocr_google_vision(rm_files)
+            return (result, "google")
+        result = _ocr_tesseract(rm_files)
+        return (result, "tesseract")
+    elif backend == "google":
         result = _ocr_google_vision(rm_files)
         return (result, "google")
     else:
         result = _ocr_tesseract(rm_files)
         return (result, "tesseract")
+
+
+def _ocr_myscript(rm_files: List[Path]) -> Optional[List[str]]:
+    """
+    OCR using MyScript Cloud API.
+    Best quality for handwriting recognition, works with vector data directly.
+
+    Requires: MYSCRIPT_APP_KEY and MYSCRIPT_HMAC_KEY environment variables.
+    Optional: MYSCRIPT_LANGUAGE (default: ru)
+    """
+    try:
+        from remarkable_mcp.myscript import ocr_rm_file_with_myscript
+
+        ocr_results = []
+
+        for rm_file in rm_files:
+            try:
+                # Read the .rm file content
+                rm_data = rm_file.read_bytes()
+
+                # Run MyScript OCR on the raw .rm data
+                text = ocr_rm_file_with_myscript(rm_data)
+
+                if text and text.strip():
+                    ocr_results.append(text.strip())
+
+            except Exception:
+                # Page failed - skip and continue
+                pass
+
+        return ocr_results if ocr_results else None
+
+    except ImportError:
+        # MyScript module not available
+        return None
+    except ValueError:
+        # API keys not configured
+        return None
+    except Exception:
+        # MyScript API error
+        return None
 
 
 def _ocr_google_vision(rm_files: List[Path]) -> Optional[List[str]]:

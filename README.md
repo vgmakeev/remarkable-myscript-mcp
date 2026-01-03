@@ -214,8 +214,9 @@ For handwritten content, remarkable-mcp offers several OCR backends. Choose base
 
 | Backend | Setup | Quality | Offline | Best For |
 |---------|-------|---------|---------|----------|
+| **MyScript** ⭐ | API keys | Excellent | ❌ | Best for Russian/multilingual handwriting, works with vectors |
 | **Sampling** | No API key | Depends on client model | ✅ | Users with capable AI clients |
-| **Google Vision** | API key | Excellent | ❌ | Best handwriting accuracy |
+| **Google Vision** | API key | Excellent | ❌ | Good handwriting accuracy |
 | **Tesseract** | System install | Poor for handwriting | ✅ | Printed text, offline fallback |
 
 ### Quick Setup
@@ -225,12 +226,45 @@ Set `REMARKABLE_OCR_BACKEND` in your MCP config:
 ```json
 {
   "env": {
-    "REMARKABLE_OCR_BACKEND": "sampling"
+    "REMARKABLE_OCR_BACKEND": "myscript"
   }
 }
 ```
 
-**Options:** `sampling`, `google`, `tesseract`, `auto`
+**Options:** `myscript`, `sampling`, `google`, `tesseract`, `auto`
+
+<details>
+<summary>📖 MyScript OCR (Recommended for Russian)</summary>
+
+**Best quality for Russian handwriting recognition.** Works directly with vector data from reMarkable — no image conversion needed.
+
+**Setup:**
+1. Register at [developer.myscript.com](https://developer.myscript.com/)
+2. Create an application and get your API keys
+3. Add to config:
+
+```json
+{
+  "env": {
+    "REMARKABLE_OCR_BACKEND": "myscript",
+    "MYSCRIPT_APP_KEY": "your-app-key",
+    "MYSCRIPT_HMAC_KEY": "your-hmac-key",
+    "MYSCRIPT_LANGUAGE": "ru"
+  }
+}
+```
+
+**Supported languages:** `ru`, `en`, `de`, `fr`, `es`, `it`, `pt`, `zh`, `ja`, `ko`
+
+**Advantages:**
+- ✅ Best quality for Russian handwriting
+- ✅ Works with raw vector data (no image conversion)
+- ✅ Faster than image-based OCR
+- ✅ Better accuracy for connected cursive writing
+
+**Cost:** 2,000 free requests/month
+
+</details>
 
 <details>
 <summary>📖 Sampling OCR (No API Key)</summary>
@@ -286,8 +320,9 @@ choco install tesseract
 ### Default Behavior (`auto`)
 
 When `REMARKABLE_OCR_BACKEND=auto` (default):
-1. Google Vision (if `GOOGLE_VISION_API_KEY` is set)
-2. Tesseract (fallback)
+1. MyScript (if `MYSCRIPT_APP_KEY` and `MYSCRIPT_HMAC_KEY` are set)
+2. Google Vision (if `GOOGLE_VISION_API_KEY` is set)
+3. Tesseract (fallback)
 
 ---
 
