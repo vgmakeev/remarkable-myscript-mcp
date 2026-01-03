@@ -21,35 +21,67 @@ Whether you're researching, writing, or developing ideas, remarkable-mcp lets yo
 
 ## Quick Install
 
-### ⚡ SSH Mode (Recommended)
+### ⚡ SSH Mode with MyScript OCR (Recommended)
 
-Connect directly via USB for **10-100x faster** access, offline operation, and no subscription required.
-
-[![Install SSH Mode in VS Code](https://img.shields.io/badge/VS_Code-Install_SSH_Mode-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--ssh%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D)
-[![Install SSH Mode in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_SSH_Mode-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=remarkable&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22google_vision_api_key%22%2C%22description%22%3A%22Google%20Vision%20API%20Key%20(for%20handwriting%20OCR)%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22remarkable-mcp%22%2C%22--ssh%22%5D%2C%22env%22%3A%7B%22GOOGLE_VISION_API_KEY%22%3A%22%24%7Binput%3Agoogle_vision_api_key%7D%22%7D%7D&quality=insiders)
+This fork adds **MyScript OCR** — the best quality for Russian handwriting recognition, working directly with vector data.
 
 **Requirements:** [Developer mode enabled](docs/ssh-setup.md) + USB connection to your reMarkable
 
-<details>
-<summary>📋 Manual SSH Configuration</summary>
-
-Add to `.vscode/mcp.json`:
+Add to your MCP config (`.cursor/mcp.json` or `.vscode/mcp.json`):
 
 ```json
 {
   "servers": {
     "remarkable": {
       "command": "uvx",
-      "args": ["remarkable-mcp", "--ssh"],
+      "args": [
+        "--with", "rmc",
+        "--with", "cairosvg",
+        "--from", "git+https://github.com/vgmakeev/remarkable-myscript-mcp",
+        "remarkable-mcp",
+        "--ssh"
+      ],
       "env": {
-        "GOOGLE_VISION_API_KEY": "your-api-key"
+        "REMARKABLE_SSH_HOST": "remarkable",
+        "REMARKABLE_OCR_BACKEND": "myscript",
+        "MYSCRIPT_APP_KEY": "your-app-key",
+        "MYSCRIPT_HMAC_KEY": "your-hmac-key",
+        "MYSCRIPT_LANGUAGE": "ru"
       }
     }
   }
 }
 ```
 
-See [SSH Setup Guide](docs/ssh-setup.md) for detailed instructions.
+Get your MyScript API keys at [developer.myscript.com](https://developer.myscript.com/) (2,000 free requests/month).
+
+<details>
+<summary>📋 Alternative: Google Vision or Sampling OCR</summary>
+
+If you don't need MyScript, you can use other OCR backends:
+
+```json
+{
+  "servers": {
+    "remarkable": {
+      "command": "uvx",
+      "args": [
+        "--with", "rmc",
+        "--with", "cairosvg",
+        "--from", "git+https://github.com/vgmakeev/remarkable-myscript-mcp",
+        "remarkable-mcp",
+        "--ssh"
+      ],
+      "env": {
+        "REMARKABLE_SSH_HOST": "remarkable",
+        "REMARKABLE_OCR_BACKEND": "sampling"
+      }
+    }
+  }
+}
+```
+
+Options: `myscript`, `sampling`, `google`, `tesseract`, `auto`
 
 </details>
 
