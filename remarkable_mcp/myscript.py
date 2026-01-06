@@ -527,12 +527,22 @@ def get_language_from_env() -> LanguageCode:
     return lang_map.get(lang_env, LanguageCode.RU)
 
 
-def ocr_rm_file_with_myscript(rm_data: bytes) -> Optional[str]:
+# MyScript API has a payload size limit (~1MB).
+# Large pages with many strokes (e.g., 3000+) will get 413 error.
+# Batch strokes to avoid this limit.
+MYSCRIPT_BATCH_SIZE = 500
+
+
+def ocr_rm_file_with_myscript(rm_data: bytes, batch_size: int = MYSCRIPT_BATCH_SIZE) -> Optional[str]:
     """
     Recognize text from .rm file using MyScript.
 
+    For large pages with many strokes, automatically batches requests
+    to avoid MyScript API payload size limits (413 error).
+
     Args:
         rm_data: Contents of .rm file
+        batch_size: Maximum strokes per API request (default: 500)
 
     Returns:
         Recognized text or None on error
@@ -545,24 +555,57 @@ def ocr_rm_file_with_myscript(rm_data: bytes) -> Optional[str]:
         if not strokes:
             return None
 
-        # Convert to MyScript format
-        stroke_groups = convert_rm_strokes_to_myscript(strokes, time_offset=0)
+        width = parsed_data.get("width", 1872)
+        height = parsed_data.get("height", 1404)
+        language = get_language_from_env()
 
-        if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
-            return None
+        # If strokes fit in one batch, use simple path
+        if len(strokes) <= batch_size:
+            stroke_groups = convert_rm_strokes_to_myscript(strokes, time_offset=0)
 
-        # Create request
-        request = MyScriptRequest(
-            width=parsed_data.get("width", 1872),
-            height=parsed_data.get("height", 1404),
-            language=get_language_from_env(),
-            stroke_groups=stroke_groups,
-        )
+            if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
+                return None
 
-        # Send for recognition
+            request = MyScriptRequest(
+                width=width,
+                height=height,
+                language=language,
+                stroke_groups=stroke_groups,
+            )
+
+            client = MyScriptOCR()
+            result = client.recognize(request)
+            return result.get("label", "")
+
+        # Large page: batch strokes to avoid 413 error
         client = MyScriptOCR()
-        result = client.recognize(request)
-        return result.get("label", "")
+        results = []
+
+        for i in range(0, len(strokes), batch_size):
+            batch = strokes[i : i + batch_size]
+
+            stroke_groups = convert_rm_strokes_to_myscript(batch, time_offset=0)
+
+            if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
+                continue
+
+            request = MyScriptRequest(
+                width=width,
+                height=height,
+                language=language,
+                stroke_groups=stroke_groups,
+            )
+
+            try:
+                result = client.recognize(request)
+                text = result.get("label", "")
+                if text and text.strip():
+                    results.append(text.strip())
+            except Exception:
+                # Batch failed - continue with next batch
+                pass
+
+        return "\n".join(results) if results else None
 
     except Exception:
         # MyScript error - return None to allow fallback
