@@ -531,18 +531,145 @@ def get_language_from_env() -> LanguageCode:
 # Large pages with many strokes (e.g., 3000+) will get 413 error.
 # Batch strokes to avoid this limit.
 MYSCRIPT_BATCH_SIZE = 500
+MYSCRIPT_LINE_THRESHOLD = 30  # Y-distance threshold to consider strokes on same line (pixels)
 
 
-def ocr_rm_file_with_myscript(rm_data: bytes, batch_size: int = MYSCRIPT_BATCH_SIZE) -> Optional[str]:
+def _get_stroke_y_center(stroke: Dict) -> float:
+    """Get average Y coordinate of a stroke for spatial sorting."""
+    dots = stroke.get("dots", [])
+    if not dots:
+        return 0.0
+    y_values = [d.get("y", 0) for d in dots]
+    return sum(y_values) / len(y_values)
+
+
+def _get_stroke_x_center(stroke: Dict) -> float:
+    """Get average X coordinate of a stroke."""
+    dots = stroke.get("dots", [])
+    if not dots:
+        return 0.0
+    x_values = [d.get("x", 0) for d in dots]
+    return sum(x_values) / len(x_values)
+
+
+def _group_strokes_by_lines(strokes: List[Dict], threshold: float = MYSCRIPT_LINE_THRESHOLD) -> List[List[Dict]]:
+    """
+    Group strokes into lines based on Y-coordinate proximity.
+    
+    Strokes with Y-centers within 'threshold' pixels are considered on the same line.
+    Within each line, strokes are sorted left-to-right by X.
+    Lines are sorted top-to-bottom by Y.
+    
+    Args:
+        strokes: List of stroke dictionaries
+        threshold: Max Y-distance to consider strokes on same line (default: 30px)
+    
+    Returns:
+        List of lines, where each line is a list of strokes sorted by X
+    """
+    if not strokes:
+        return []
+    
+    # Calculate Y-center for each stroke
+    strokes_with_y = [(s, _get_stroke_y_center(s), _get_stroke_x_center(s)) for s in strokes]
+    
+    # Sort by Y first
+    strokes_with_y.sort(key=lambda x: x[1])
+    
+    lines = []
+    current_line = []
+    current_line_y = None
+    
+    for stroke, y_center, x_center in strokes_with_y:
+        if current_line_y is None:
+            # First stroke
+            current_line = [(stroke, x_center)]
+            current_line_y = y_center
+        elif abs(y_center - current_line_y) <= threshold:
+            # Same line - add to current
+            current_line.append((stroke, x_center))
+            # Update line Y as average
+            current_line_y = (current_line_y * (len(current_line) - 1) + y_center) / len(current_line)
+        else:
+            # New line - save current and start new
+            # Sort current line by X (left to right)
+            current_line.sort(key=lambda x: x[1])
+            lines.append([s for s, _ in current_line])
+            current_line = [(stroke, x_center)]
+            current_line_y = y_center
+    
+    # Don't forget last line
+    if current_line:
+        current_line.sort(key=lambda x: x[1])
+        lines.append([s for s, _ in current_line])
+    
+    return lines
+
+
+def _create_line_batches(lines: List[List[Dict]], batch_size: int = MYSCRIPT_BATCH_SIZE) -> List[List[Dict]]:
+    """
+    Create batches of strokes, keeping lines together.
+    
+    Each batch contains up to batch_size strokes, but we try not to split lines.
+    If a single line has more than batch_size strokes, it goes into its own batch.
+    
+    Args:
+        lines: List of lines (each line is a list of strokes)
+        batch_size: Maximum strokes per batch
+    
+    Returns:
+        List of batches (each batch is a flat list of strokes)
+    """
+    batches = []
+    current_batch = []
+    current_count = 0
+    
+    for line in lines:
+        line_count = len(line)
+        
+        if line_count > batch_size:
+            # Line is too big - save current batch and put line in its own batch
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_count = 0
+            batches.append(line)
+        elif current_count + line_count > batch_size:
+            # Adding this line would exceed batch size - start new batch
+            if current_batch:
+                batches.append(current_batch)
+            current_batch = line.copy()
+            current_count = line_count
+        else:
+            # Add line to current batch
+            current_batch.extend(line)
+            current_count += line_count
+    
+    # Don't forget last batch
+    if current_batch:
+        batches.append(current_batch)
+    
+    return batches
+
+
+def ocr_rm_file_with_myscript(
+    rm_data: bytes, 
+    batch_size: int = MYSCRIPT_BATCH_SIZE,
+    line_threshold: float = MYSCRIPT_LINE_THRESHOLD,
+) -> Optional[str]:
     """
     Recognize text from .rm file using MyScript.
 
     For large pages with many strokes, automatically batches requests
     to avoid MyScript API payload size limits (413 error).
+    
+    Strokes are grouped by lines (based on Y-coordinate proximity) and
+    batches are created to keep lines together for better OCR accuracy.
 
     Args:
         rm_data: Contents of .rm file
         batch_size: Maximum strokes per API request (default: 500)
+        line_threshold: Y-distance threshold to group strokes into lines (default: 30px)
 
     Returns:
         Recognized text or None on error
@@ -559,9 +686,15 @@ def ocr_rm_file_with_myscript(rm_data: bytes, batch_size: int = MYSCRIPT_BATCH_S
         height = parsed_data.get("height", 1404)
         language = get_language_from_env()
 
+        # Group strokes by lines (top-to-bottom, left-to-right within each line)
+        lines = _group_strokes_by_lines(strokes, threshold=line_threshold)
+        
+        # Flatten for single batch if small enough
+        all_strokes_sorted = [s for line in lines for s in line]
+
         # If strokes fit in one batch, use simple path
-        if len(strokes) <= batch_size:
-            stroke_groups = convert_rm_strokes_to_myscript(strokes, time_offset=0)
+        if len(all_strokes_sorted) <= batch_size:
+            stroke_groups = convert_rm_strokes_to_myscript(all_strokes_sorted, time_offset=0)
 
             if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
                 return None
@@ -577,13 +710,13 @@ def ocr_rm_file_with_myscript(rm_data: bytes, batch_size: int = MYSCRIPT_BATCH_S
             result = client.recognize(request)
             return result.get("label", "")
 
-        # Large page: batch strokes to avoid 413 error
+        # Large page: create batches keeping lines together
+        batches = _create_line_batches(lines, batch_size=batch_size)
+        
         client = MyScriptOCR()
         results = []
 
-        for i in range(0, len(strokes), batch_size):
-            batch = strokes[i : i + batch_size]
-
+        for batch in batches:
             stroke_groups = convert_rm_strokes_to_myscript(batch, time_offset=0)
 
             if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
