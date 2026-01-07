@@ -75,7 +75,8 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
 - `remarkable_image_fragments(document, page, fragments)` - Get page as multiple vertical PNG fragments
-- `remarkable_ocr_combined(document, page, fragments)` - Get MyScript OCR + image fragments together
+- `remarkable_ocr_combined(document, page)` - Get MyScript OCR + image fragments (falls back to vision-only if no API keys)
+- `remarkable_save_pdf(document, output_path)` - Export document as PDF file
 
 ## Recommended Workflows
 

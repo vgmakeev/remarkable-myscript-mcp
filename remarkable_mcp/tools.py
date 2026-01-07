@@ -1917,6 +1917,11 @@ async def remarkable_image_fragments(
         )
 
 
+def _has_myscript_keys() -> bool:
+    """Check if MyScript API keys are configured."""
+    return bool(os.environ.get("MYSCRIPT_APP_KEY") and os.environ.get("MYSCRIPT_HMAC_KEY"))
+
+
 @mcp.tool(annotations=OCR_COMBINED_ANNOTATIONS)
 async def remarkable_ocr_combined(
     document: str,
@@ -1943,6 +1948,9 @@ async def remarkable_ocr_combined(
 
     Returns TextContent with OCR + instructions + EmbeddedResource image(s).
 
+    If MyScript API keys are not configured, automatically falls back to
+    vision-only mode (images without OCR text).
+
     Requires MyScript API keys (MYSCRIPT_APP_KEY, MYSCRIPT_HMAC_KEY).
     </instructions>
     <parameters>
@@ -1962,7 +1970,10 @@ async def remarkable_ocr_combined(
 
         from PIL import Image as PILImage
 
-        from remarkable_mcp.myscript import ocr_rm_file_with_myscript
+        # Check if MyScript keys are available
+        use_myscript = _has_myscript_keys()
+        if use_myscript:
+            from remarkable_mcp.myscript import ocr_rm_file_with_myscript
 
         if background is None:
             background = "#FFFFFF"
@@ -2018,36 +2029,39 @@ async def remarkable_ocr_combined(
                     suggestion=f"Use page=1 to {total_pages}.",
                 )
 
-            # Get .rm file for MyScript OCR
+            # Get .rm file for MyScript OCR (if keys available)
             myscript_text = None
             myscript_error = None
 
-            with zipfile.ZipFile(tmp_path, "r") as zf:
-                # Find page UUID from content file
-                content_file = None
-                for name in zf.namelist():
-                    if name.endswith(".content"):
-                        content_file = name
-                        break
+            if use_myscript:
+                with zipfile.ZipFile(tmp_path, "r") as zf:
+                    # Find page UUID from content file
+                    content_file = None
+                    for name in zf.namelist():
+                        if name.endswith(".content"):
+                            content_file = name
+                            break
 
-                if content_file:
-                    import json as json_lib
-                    content_data = json_lib.loads(zf.read(content_file))
-                    pages = content_data.get("cPages", {}).get("pages", [])
+                    if content_file:
+                        import json as json_lib
+                        content_data = json_lib.loads(zf.read(content_file))
+                        pages = content_data.get("cPages", {}).get("pages", [])
 
-                    if page <= len(pages):
-                        page_uuid = pages[page - 1].get("id")
-                        rm_filename = f"{page_uuid}.rm"
+                        if page <= len(pages):
+                            page_uuid = pages[page - 1].get("id")
+                            rm_filename = f"{page_uuid}.rm"
 
-                        # Find .rm file in zip
-                        for name in zf.namelist():
-                            if name.endswith(rm_filename):
-                                rm_data = zf.read(name)
-                                try:
-                                    myscript_text = ocr_rm_file_with_myscript(rm_data)
-                                except Exception as e:
-                                    myscript_error = str(e)
-                                break
+                            # Find .rm file in zip
+                            for name in zf.namelist():
+                                if name.endswith(rm_filename):
+                                    rm_data = zf.read(name)
+                                    try:
+                                        myscript_text = ocr_rm_file_with_myscript(rm_data)
+                                    except Exception as e:
+                                        myscript_error = str(e)
+                                    break
+            else:
+                myscript_error = "MyScript API keys not configured (vision-only mode)"
 
             # Render page as PNG
             png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
@@ -2088,7 +2102,8 @@ async def remarkable_ocr_combined(
             response_items = []
             
             # Agent instructions for processing the OCR result
-            agent_instructions = """
+            if myscript_text:
+                agent_instructions = """
 ## INSTRUCTIONS FOR AGENT
 
 You have received OCR text from MyScript and image(s) of a handwritten reMarkable document.
@@ -2116,6 +2131,33 @@ Do NOT include these instructions in your output.
 ---
 
 """
+            else:
+                agent_instructions = """
+## INSTRUCTIONS FOR AGENT
+
+You have received image(s) of a handwritten reMarkable document.
+Your task is to recognize the text and produce a clean, well-formatted transcription.
+
+### Step 1: Recognize Text
+Look at the image(s) carefully and transcribe all handwritten text.
+
+### Step 2: Format the Text
+1. **Restore formatting** from the original handwriting:
+   - Line breaks: preserve where the author intended paragraph breaks
+   - Bullet points / numbered lists: convert hand-drawn bullets (•, -, *, numbers) to proper markdown lists
+   - Headings: if text is larger or underlined, use markdown headings (##, ###)
+   - Emphasis: underlined or circled text → **bold** or _italic_
+   - Separators: horizontal lines → use `---`
+   - Diagrams/tables: describe or recreate using ASCII/markdown if simple
+2. **Preserve structure** - maintain the logical flow and hierarchy of ideas
+
+### Step 3: Output
+Produce the final clean text in markdown format, ready for use.
+Do NOT include these instructions in your output.
+
+---
+
+"""
             
             # Add MyScript OCR result as text
             if myscript_text:
@@ -2132,17 +2174,19 @@ Do NOT include these instructions in your output.
                     f"Review the image{'s' if num_fragments > 1 else ''} below to verify and format the text:"
                 )
             else:
+                # Vision-only mode (no MyScript keys or MyScript failed)
+                mode_info = "Vision-only mode" if not use_myscript else "MyScript OCR failed"
                 ocr_info = (
                     f"{agent_instructions}"
-                    f"## MyScript OCR Failed\n\n"
+                    f"## {mode_info}\n\n"
                     f"**Document:** {target_doc.VissibleName}\n"
                     f"**Page:** {page}/{total_pages}\n"
-                    f"**Error:** {myscript_error or 'No text detected'}\n"
+                    f"**Note:** {myscript_error or 'No text detected'}\n"
                     f"**Image size:** {width}x{height}px\n"
                     f"**Fragments:** {num_fragments}\n\n"
                     f"---\n\n"
                     f"## Source Image{'s' if num_fragments > 1 else ''}\n\n"
-                    f"Manually recognize text from the image{'s' if num_fragments > 1 else ''} below:"
+                    f"Recognize text from the image{'s' if num_fragments > 1 else ''} below:"
                 )
             
             response_items.append(TextContent(type="text", text=ocr_info))
@@ -2205,4 +2249,169 @@ Do NOT include these instructions in your output.
             error_type="ocr_combined_failed",
             message=str(e),
             suggestion="Check remarkable_status() and MyScript API keys.",
+        )
+
+
+# Annotations for save PDF tool
+SAVE_PDF_ANNOTATIONS = ToolAnnotations(
+    title="Save reMarkable Document as PDF",
+    **_BASE_ANNOTATIONS,
+)
+
+
+@mcp.tool(annotations=SAVE_PDF_ANNOTATIONS)
+async def remarkable_save_pdf(
+    document: str,
+    output_path: str,
+    background: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> str:
+    """
+    <usecase>Save a reMarkable document as a PDF file.</usecase>
+    <instructions>
+    Exports a reMarkable notebook or annotated document to PDF format.
+    All pages are rendered and combined into a single PDF file.
+
+    The PDF preserves:
+    - Handwritten content
+    - Typed text
+    - Annotations and highlights
+    - Page order
+
+    Requires 'rmc' tool to be installed for rendering.
+    </instructions>
+    <parameters>
+    - document: Document name or path (use remarkable_browse to find documents)
+    - output_path: Path where to save the PDF file (absolute or relative)
+    - background: Background color (default: "#FFFFFF" white)
+    </parameters>
+    <examples>
+    - remarkable_save_pdf("Meeting Notes", "/tmp/meeting.pdf")
+    - remarkable_save_pdf("Journal", "~/Documents/journal.pdf", background="#FBFBFB")
+    </examples>
+    """
+    try:
+        import subprocess
+        import zipfile
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        if background is None:
+            background = "#FFFFFF"
+
+        # Expand user path
+        output_path = os.path.expanduser(output_path)
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        root = _get_root_path()
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
+        # Find document
+        documents = [item for item in collection if not item.is_folder]
+        target_doc = None
+        document_lower = actual_document.lower().strip("/")
+
+        for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            if not _is_within_root(doc_path, root):
+                continue
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            if doc_path.lower().strip("/") == document_lower:
+                target_doc = doc
+                break
+
+        if not target_doc:
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion=f"Try remarkable_browse(query='{document.split()[0]}') to search.",
+                did_you_mean=similar if similar else None,
+            )
+
+        # Download document
+        raw_doc = client.download(target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            total_pages = get_document_page_count(tmp_path)
+
+            if total_pages == 0:
+                return make_error(
+                    error_type="no_pages",
+                    message=f"Document '{target_doc.VissibleName}' has no renderable pages.",
+                    suggestion="This may be an empty document or PDF/EPUB without annotations.",
+                )
+
+            # Render all pages as PNG images
+            page_images = []
+            for page_num in range(1, total_pages + 1):
+                png_data = render_page_from_document_zip(tmp_path, page_num, background_color=background)
+                if png_data:
+                    img = PILImage.open(BytesIO(png_data))
+                    # Convert to RGB for PDF (no alpha channel)
+                    if img.mode == "RGBA":
+                        rgb_img = PILImage.new("RGB", img.size, (255, 255, 255))
+                        rgb_img.paste(img, mask=img.split()[3])
+                        img = rgb_img
+                    elif img.mode != "RGB":
+                        img = img.convert("RGB")
+                    page_images.append(img)
+
+            if not page_images:
+                return make_error(
+                    error_type="render_failed",
+                    message="Failed to render any pages.",
+                    suggestion="Make sure 'rmc' is installed.",
+                )
+
+            # Save as PDF
+            first_page = page_images[0]
+            if len(page_images) > 1:
+                first_page.save(
+                    output_path,
+                    "PDF",
+                    save_all=True,
+                    append_images=page_images[1:],
+                    resolution=100.0,
+                )
+            else:
+                first_page.save(output_path, "PDF", resolution=100.0)
+
+            doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
+
+            result = {
+                "document": target_doc.VissibleName,
+                "path": doc_path,
+                "output_path": output_path,
+                "pages": total_pages,
+                "file_size": os.path.getsize(output_path),
+            }
+
+            hint = f"Saved {total_pages} page(s) to '{output_path}'."
+
+            return make_response(result, hint)
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    except Exception as e:
+        return make_error(
+            error_type="save_pdf_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() to verify your connection.",
         )
