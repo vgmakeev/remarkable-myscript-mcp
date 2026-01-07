@@ -693,8 +693,8 @@ def _recognize_batch(
         return (batch_index, None)
 
 
-# Number of parallel threads for MyScript API calls
-MYSCRIPT_PARALLEL_THREADS = 7
+# Number of parallel threads for MyScript API calls (CPU cores - 1, minimum 1)
+MYSCRIPT_PARALLEL_THREADS = max(1, (os.cpu_count() or 4) - 1)
 
 
 def ocr_rm_file_with_myscript(
