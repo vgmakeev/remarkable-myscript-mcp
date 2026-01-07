@@ -1614,6 +1614,40 @@ OCR_COMBINED_ANNOTATIONS = ToolAnnotations(
     **_BASE_ANNOTATIONS,
 )
 
+# Optimal image size for Claude vision (max dimension)
+CLAUDE_VISION_MAX_SIZE = 1568
+
+
+def _resize_image_for_claude(img, max_size: int = CLAUDE_VISION_MAX_SIZE):
+    """
+    Resize image to fit within max_size while preserving aspect ratio.
+    
+    Args:
+        img: PIL Image object
+        max_size: Maximum dimension (width or height)
+    
+    Returns:
+        Resized PIL Image (or original if already small enough)
+    """
+    from PIL import Image as PILImage
+    
+    width, height = img.size
+    
+    # Check if resize is needed
+    if width <= max_size and height <= max_size:
+        return img
+    
+    # Calculate new dimensions preserving aspect ratio
+    if width > height:
+        new_width = max_size
+        new_height = int(height * max_size / width)
+    else:
+        new_height = max_size
+        new_width = int(width * max_size / height)
+    
+    # Use LANCZOS for high-quality downscaling
+    return img.resize((new_width, new_height), PILImage.Resampling.LANCZOS)
+
 
 @mcp.tool(annotations=IMAGE_FRAGMENTS_ANNOTATIONS)
 async def remarkable_image_fragments(
@@ -1632,7 +1666,8 @@ async def remarkable_image_fragments(
     - Better OCR accuracy by processing smaller chunks
     - Parallel processing of page sections
 
-    Returns multiple base64-encoded PNG images that can be fed to vision models.
+    Returns multiple EmbeddedResource images that Claude can see directly.
+    Images are resized to max 1568px (optimal for Claude vision).
 
     The page is split evenly into the specified number of fragments from top to bottom.
     </instructions>
@@ -1721,12 +1756,28 @@ async def remarkable_image_fragments(
                     suggestion="Make sure 'rmc' and 'cairosvg' are installed.",
                 )
 
-            # Split into fragments using PIL
+            # Load and resize image for Claude vision
             img = PILImage.open(BytesIO(png_data))
+            img = _resize_image_for_claude(img)
             width, height = img.size
             fragment_height = height // fragments
 
-            fragment_data = []
+            # Build response with EmbeddedResource for each fragment
+            doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
+            uri_path = doc_path.lstrip("/")
+            
+            response_items = []
+            
+            # Add text info first
+            info_text = (
+                f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
+                f"split into {fragments} fragments. "
+                f"Resized to {width}x{height}px for Claude vision. "
+                f"Review each fragment below:"
+            )
+            response_items.append(TextContent(type="text", text=info_text))
+            
+            # Add each fragment as EmbeddedResource
             for i in range(fragments):
                 top = i * fragment_height
                 bottom = (i + 1) * fragment_height if i < fragments - 1 else height
@@ -1734,37 +1785,28 @@ async def remarkable_image_fragments(
 
                 # Convert to PNG bytes
                 buffer = BytesIO()
-                fragment_img.save(buffer, format="PNG")
+                fragment_img.save(buffer, format="PNG", optimize=True)
                 fragment_bytes = buffer.getvalue()
                 fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
 
-                fragment_data.append({
-                    "fragment": i + 1,
-                    "y_start": top,
-                    "y_end": bottom,
-                    "width": width,
-                    "height": bottom - top,
-                    "data_uri": f"data:image/png;base64,{fragment_b64}",
-                    "image_base64": fragment_b64,
-                })
+                # Create EmbeddedResource
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                blob_resource = BlobResourceContents(
+                    uri=resource_uri,
+                    mimeType="image/png",
+                    blob=fragment_b64,
+                )
+                embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                
+                # Add fragment label and image
+                fragment_label = TextContent(
+                    type="text",
+                    text=f"\n--- Fragment {i+1}/{fragments} (y: {top}-{bottom}px) ---"
+                )
+                response_items.append(fragment_label)
+                response_items.append(embedded)
 
-            result = {
-                "document": target_doc.VissibleName,
-                "page": page,
-                "total_pages": total_pages,
-                "full_width": width,
-                "full_height": height,
-                "fragment_count": fragments,
-                "fragments": fragment_data,
-            }
-
-            hint = (
-                f"Page {page}/{total_pages} split into {fragments} fragments. "
-                f"Full size: {width}x{height}px. "
-                "Feed fragments to vision model for recognition."
-            )
-
-            return make_response(result, hint)
+            return response_items
 
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -1796,6 +1838,9 @@ async def remarkable_ocr_combined(
     - Get initial OCR text from MyScript (fast, works with vectors)
     - Verify/improve OCR using vision model on the images
     - Manually review ambiguous sections visually
+
+    Returns TextContent with MyScript OCR result + EmbeddedResource images.
+    Images are resized to max 1568px (optimal for Claude vision).
 
     Requires MyScript API keys (MYSCRIPT_APP_KEY, MYSCRIPT_HMAC_KEY).
     </instructions>
@@ -1906,70 +1951,92 @@ async def remarkable_ocr_combined(
                                     myscript_error = str(e)
                                 break
 
-            # Render page as PNG and split into fragments
+            # Render page as PNG
             png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
 
-            fragment_data = []
-            full_width = 0
-            full_height = 0
+            if png_data is None:
+                # If no image but we have OCR text, return just the text
+                if myscript_text:
+                    return [TextContent(
+                        type="text",
+                        text=f"MyScript OCR result for '{target_doc.VissibleName}' "
+                             f"(page {page}/{total_pages}):\n\n{myscript_text}\n\n"
+                             "(Image rendering failed - text only)"
+                    )]
+                return make_error(
+                    error_type="render_failed",
+                    message="Failed to render page to image.",
+                    suggestion="Make sure 'rmc' and 'cairosvg' are installed.",
+                )
 
-            if png_data:
-                img = PILImage.open(BytesIO(png_data))
-                full_width, full_height = img.size
-                fragment_height = full_height // fragments
+            # Load and resize image for Claude vision
+            img = PILImage.open(BytesIO(png_data))
+            img = _resize_image_for_claude(img)
+            width, height = img.size
+            fragment_height = height // fragments
 
-                for i in range(fragments):
-                    top = i * fragment_height
-                    bottom = (i + 1) * fragment_height if i < fragments - 1 else full_height
-                    fragment_img = img.crop((0, top, full_width, bottom))
-
-                    buffer = BytesIO()
-                    fragment_img.save(buffer, format="PNG")
-                    fragment_bytes = buffer.getvalue()
-                    fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
-
-                    fragment_data.append({
-                        "fragment": i + 1,
-                        "y_start": top,
-                        "y_end": bottom,
-                        "width": full_width,
-                        "height": bottom - top,
-                        "data_uri": f"data:image/png;base64,{fragment_b64}",
-                        "image_base64": fragment_b64,
-                    })
-
-            result = {
-                "document": target_doc.VissibleName,
-                "page": page,
-                "total_pages": total_pages,
-                "myscript_ocr": {
-                    "text": myscript_text,
-                    "success": myscript_text is not None,
-                    "error": myscript_error,
-                },
-                "image": {
-                    "full_width": full_width,
-                    "full_height": full_height,
-                    "fragment_count": len(fragment_data),
-                    "fragments": fragment_data,
-                },
-            }
-
-            # Build hint
+            # Build response with TextContent + EmbeddedResources
+            doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
+            uri_path = doc_path.lstrip("/")
+            
+            response_items = []
+            
+            # Add MyScript OCR result as text
             if myscript_text:
-                text_preview = myscript_text[:200] + "..." if len(myscript_text) > 200 else myscript_text
-                hint = (
-                    f"MyScript OCR extracted {len(myscript_text)} chars. "
-                    f"Also included {len(fragment_data)} image fragments for verification. "
-                    f"Preview: {text_preview}"
+                ocr_info = (
+                    f"## MyScript OCR Result\n\n"
+                    f"**Document:** {target_doc.VissibleName}\n"
+                    f"**Page:** {page}/{total_pages}\n"
+                    f"**Image size:** {width}x{height}px (resized for Claude)\n\n"
+                    f"### Recognized Text:\n\n{myscript_text}\n\n"
+                    f"---\n\n"
+                    f"## Image Fragments for Verification\n\n"
+                    f"Review the {fragments} image fragments below to verify/correct the OCR:"
                 )
             else:
-                hint = (
-                    f"MyScript OCR failed ({myscript_error or 'no text'}). "
-                    f"Use the {len(fragment_data)} image fragments for vision-based OCR."
+                ocr_info = (
+                    f"## MyScript OCR Failed\n\n"
+                    f"**Document:** {target_doc.VissibleName}\n"
+                    f"**Page:** {page}/{total_pages}\n"
+                    f"**Error:** {myscript_error or 'No text detected'}\n"
+                    f"**Image size:** {width}x{height}px (resized for Claude)\n\n"
+                    f"---\n\n"
+                    f"## Image Fragments for Manual Recognition\n\n"
+                    f"Use the {fragments} image fragments below to recognize the text manually:"
                 )
+            
+            response_items.append(TextContent(type="text", text=ocr_info))
+            
+            # Add each fragment as EmbeddedResource
+            for i in range(fragments):
+                top = i * fragment_height
+                bottom = (i + 1) * fragment_height if i < fragments - 1 else height
+                fragment_img = img.crop((0, top, width, bottom))
 
-            return make_response(result, hint)
+                # Convert to PNG bytes
+                buffer = BytesIO()
+                fragment_img.save(buffer, format="PNG", optimize=True)
+                fragment_bytes = buffer.getvalue()
+                fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
+
+                # Create EmbeddedResource
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                blob_resource = BlobResourceContents(
+                    uri=resource_uri,
+                    mimeType="image/png",
+                    blob=fragment_b64,
+                )
+                embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                
+                # Add fragment label and image
+                fragment_label = TextContent(
+                    type="text",
+                    text=f"\n### Fragment {i+1}/{fragments} (y: {top}-{bottom}px)"
+                )
+                response_items.append(fragment_label)
+                response_items.append(embedded)
+
+            return response_items
 
         finally:
             tmp_path.unlink(missing_ok=True)
