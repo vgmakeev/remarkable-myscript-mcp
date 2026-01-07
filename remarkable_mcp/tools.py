@@ -1617,6 +1617,38 @@ OCR_COMBINED_ANNOTATIONS = ToolAnnotations(
 # Optimal image size for Claude vision (max dimension)
 CLAUDE_VISION_MAX_SIZE = 1568
 
+# Height threshold for splitting (if taller than this after resize, split into fragments)
+SPLIT_HEIGHT_THRESHOLD = 2000
+
+
+def _should_split_image(width: int, height: int) -> bool:
+    """
+    Determine if an image should be split into fragments.
+    
+    Split if:
+    - Height > SPLIT_HEIGHT_THRESHOLD (tall document, infinite scroll)
+    - Aspect ratio > 1.5 (significantly taller than wide)
+    
+    Don't split standard pages to save tokens.
+    """
+    aspect_ratio = height / width if width > 0 else 1
+    return height > SPLIT_HEIGHT_THRESHOLD or aspect_ratio > 1.5
+
+
+def _calculate_fragments(height: int, target_fragment_height: int = 1500) -> int:
+    """
+    Calculate optimal number of fragments based on image height.
+    
+    Args:
+        height: Image height in pixels
+        target_fragment_height: Target height per fragment (~1500px is good for vision)
+    
+    Returns:
+        Number of fragments (2-10)
+    """
+    fragments = max(2, min(10, (height + target_fragment_height - 1) // target_fragment_height))
+    return fragments
+
 
 def _resize_image_for_claude(img, max_size: int = CLAUDE_VISION_MAX_SIZE):
     """
@@ -1653,7 +1685,7 @@ def _resize_image_for_claude(img, max_size: int = CLAUDE_VISION_MAX_SIZE):
 async def remarkable_image_fragments(
     document: str,
     page: int = 1,
-    fragments: int = 4,
+    fragments: Optional[int] = None,
     background: Optional[str] = None,
     ctx: Optional[Context] = None,
 ):
@@ -1669,27 +1701,27 @@ async def remarkable_image_fragments(
     Returns multiple EmbeddedResource images that Claude can see directly.
     Images are resized to max 1568px (optimal for Claude vision).
 
-    The page is split evenly into the specified number of fragments from top to bottom.
+    Smart splitting:
+    - If fragments=None (default): auto-calculate based on page height
+    - Standard pages may return just 1 image to save tokens
+    - Tall pages are auto-split into optimal fragments
     </instructions>
     <parameters>
     - document: Document name or path (use remarkable_browse to find documents)
     - page: Page number (default: 1, 1-indexed)
-    - fragments: Number of vertical fragments to split into (default: 4, max: 10)
+    - fragments: Number of vertical fragments (default: auto based on height)
     - background: Background color as hex code (default: "#FFFFFF" white)
     </parameters>
     <examples>
-    - remarkable_image_fragments("Meeting Notes")  # 4 fragments
-    - remarkable_image_fragments("Long Document", fragments=6)  # 6 fragments
-    - remarkable_image_fragments("Sketch", page=2, fragments=3)
+    - remarkable_image_fragments("Meeting Notes")  # Auto fragments
+    - remarkable_image_fragments("Long Document", fragments=6)  # Force 6 fragments
+    - remarkable_image_fragments("Sketch", page=2)
     </examples>
     """
     try:
         from io import BytesIO
 
         from PIL import Image as PILImage
-
-        # Clamp fragments
-        fragments = max(2, min(10, fragments))
 
         # Resolve background color
         if background is None:
@@ -1760,7 +1792,17 @@ async def remarkable_image_fragments(
             img = PILImage.open(BytesIO(png_data))
             img = _resize_image_for_claude(img)
             width, height = img.size
-            fragment_height = height // fragments
+
+            # Determine number of fragments
+            if fragments is not None:
+                # User specified, clamp to valid range
+                num_fragments = max(1, min(10, fragments))
+            elif _should_split_image(width, height):
+                # Auto-calculate based on height
+                num_fragments = _calculate_fragments(height)
+            else:
+                # Standard page - single image
+                num_fragments = 1
 
             # Build response with EmbeddedResource for each fragment
             doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
@@ -1769,42 +1811,66 @@ async def remarkable_image_fragments(
             response_items = []
             
             # Add text info first
-            info_text = (
-                f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
-                f"split into {fragments} fragments. "
-                f"Resized to {width}x{height}px for Claude vision. "
-                f"Review each fragment below:"
-            )
+            if num_fragments == 1:
+                info_text = (
+                    f"Page {page}/{total_pages} of '{target_doc.VissibleName}'. "
+                    f"Size: {width}x{height}px (standard page, single image)."
+                )
+            else:
+                info_text = (
+                    f"Page {page}/{total_pages} of '{target_doc.VissibleName}' "
+                    f"split into {num_fragments} fragments. "
+                    f"Size: {width}x{height}px (tall page, auto-split). "
+                    f"Review each fragment below:"
+                )
             response_items.append(TextContent(type="text", text=info_text))
             
-            # Add each fragment as EmbeddedResource
-            for i in range(fragments):
-                top = i * fragment_height
-                bottom = (i + 1) * fragment_height if i < fragments - 1 else height
-                fragment_img = img.crop((0, top, width, bottom))
-
-                # Convert to PNG bytes
+            if num_fragments == 1:
+                # Single image
                 buffer = BytesIO()
-                fragment_img.save(buffer, format="PNG", optimize=True)
-                fragment_bytes = buffer.getvalue()
-                fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
-
-                # Create EmbeddedResource
-                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                img.save(buffer, format="PNG", optimize=True)
+                img_bytes = buffer.getvalue()
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.png"
                 blob_resource = BlobResourceContents(
                     uri=resource_uri,
                     mimeType="image/png",
-                    blob=fragment_b64,
+                    blob=img_b64,
                 )
                 embedded = EmbeddedResource(type="resource", resource=blob_resource)
-                
-                # Add fragment label and image
-                fragment_label = TextContent(
-                    type="text",
-                    text=f"\n--- Fragment {i+1}/{fragments} (y: {top}-{bottom}px) ---"
-                )
-                response_items.append(fragment_label)
                 response_items.append(embedded)
+            else:
+                # Split into fragments
+                fragment_height = height // num_fragments
+                
+                for i in range(num_fragments):
+                    top = i * fragment_height
+                    bottom = (i + 1) * fragment_height if i < num_fragments - 1 else height
+                    fragment_img = img.crop((0, top, width, bottom))
+
+                    # Convert to PNG bytes
+                    buffer = BytesIO()
+                    fragment_img.save(buffer, format="PNG", optimize=True)
+                    fragment_bytes = buffer.getvalue()
+                    fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
+
+                    # Create EmbeddedResource
+                    resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                    blob_resource = BlobResourceContents(
+                        uri=resource_uri,
+                        mimeType="image/png",
+                        blob=fragment_b64,
+                    )
+                    embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                    
+                    # Add fragment label and image
+                    fragment_label = TextContent(
+                        type="text",
+                        text=f"\n### Fragment {i+1}/{num_fragments}"
+                    )
+                    response_items.append(fragment_label)
+                    response_items.append(embedded)
 
             return response_items
 
@@ -1823,7 +1889,6 @@ async def remarkable_image_fragments(
 async def remarkable_ocr_combined(
     document: str,
     page: int = 1,
-    fragments: int = 4,
     background: Optional[str] = None,
     ctx: Optional[Context] = None,
 ):
@@ -1832,14 +1897,13 @@ async def remarkable_ocr_combined(
     <instructions>
     Combines MyScript OCR with image fragments for best recognition results:
     1. Extracts text using MyScript (high-quality vector-based OCR)
-    2. Renders page as image fragments for visual verification or LLM re-recognition
+    2. Renders page as image for visual verification or LLM re-recognition
 
-    This allows you to:
-    - Get initial OCR text from MyScript (fast, works with vectors)
-    - Verify/improve OCR using vision model on the images
-    - Manually review ambiguous sections visually
+    Smart image handling:
+    - Standard pages: single image (saves tokens)
+    - Tall/infinite-scroll pages: auto-split into fragments
 
-    Returns TextContent with MyScript OCR result + EmbeddedResource images.
+    Returns TextContent with OCR + instructions + EmbeddedResource image(s).
     Images are resized to max 1568px (optimal for Claude vision).
 
     Requires MyScript API keys (MYSCRIPT_APP_KEY, MYSCRIPT_HMAC_KEY).
@@ -1847,12 +1911,11 @@ async def remarkable_ocr_combined(
     <parameters>
     - document: Document name or path
     - page: Page number (default: 1)
-    - fragments: Number of image fragments (default: 4)
     - background: Background color for images (default: "#FFFFFF")
     </parameters>
     <examples>
     - remarkable_ocr_combined("Meeting Notes")
-    - remarkable_ocr_combined("Journal", page=3, fragments=6)
+    - remarkable_ocr_combined("Journal", page=3)
     </examples>
     """
     try:
@@ -1862,9 +1925,6 @@ async def remarkable_ocr_combined(
         from PIL import Image as PILImage
 
         from remarkable_mcp.myscript import ocr_rm_file_with_myscript
-
-        # Clamp fragments
-        fragments = max(2, min(10, fragments))
 
         if background is None:
             background = "#FFFFFF"
@@ -1973,7 +2033,14 @@ async def remarkable_ocr_combined(
             img = PILImage.open(BytesIO(png_data))
             img = _resize_image_for_claude(img)
             width, height = img.size
-            fragment_height = height // fragments
+
+            # Decide whether to split based on image dimensions
+            should_split = _should_split_image(width, height)
+            
+            if should_split:
+                num_fragments = _calculate_fragments(height)
+            else:
+                num_fragments = 1
 
             # Build response with TextContent + EmbeddedResources
             doc_path = _apply_root_filter(get_item_path(target_doc, items_by_id))
@@ -1981,60 +2048,113 @@ async def remarkable_ocr_combined(
             
             response_items = []
             
+            # Agent instructions for processing the OCR result
+            agent_instructions = """
+## INSTRUCTIONS FOR AGENT
+
+You have received OCR text from MyScript and image(s) of a handwritten reMarkable document.
+Your task is to produce a clean, well-formatted transcription.
+
+### Step 1: Review MyScript OCR
+The OCR text below is machine-generated. It may have errors, missing words, or incorrect formatting.
+
+### Step 2: Compare with Image(s)
+Look at the image(s) carefully and:
+1. **Fix recognition errors** - correct any misread words or characters
+2. **Restore formatting** from the original handwriting:
+   - Line breaks: preserve where the author intended paragraph breaks
+   - Bullet points / numbered lists: convert hand-drawn bullets (•, -, *, numbers) to proper markdown lists
+   - Headings: if text is larger or underlined, use markdown headings (##, ###)
+   - Emphasis: underlined or circled text → **bold** or _italic_
+   - Separators: horizontal lines → use `---`
+   - Diagrams/tables: describe or recreate using ASCII/markdown if simple
+3. **Preserve structure** - maintain the logical flow and hierarchy of ideas
+
+### Step 3: Output
+Produce the final clean text in markdown format, ready for use.
+Do NOT include these instructions in your output.
+
+---
+
+"""
+            
             # Add MyScript OCR result as text
             if myscript_text:
                 ocr_info = (
+                    f"{agent_instructions}"
                     f"## MyScript OCR Result\n\n"
                     f"**Document:** {target_doc.VissibleName}\n"
                     f"**Page:** {page}/{total_pages}\n"
-                    f"**Image size:** {width}x{height}px (resized for Claude)\n\n"
-                    f"### Recognized Text:\n\n{myscript_text}\n\n"
+                    f"**Image size:** {width}x{height}px\n"
+                    f"**Fragments:** {num_fragments} {'(tall page, auto-split)' if should_split else '(standard page)'}\n\n"
+                    f"### Raw OCR Text:\n\n```\n{myscript_text}\n```\n\n"
                     f"---\n\n"
-                    f"## Image Fragments for Verification\n\n"
-                    f"Review the {fragments} image fragments below to verify/correct the OCR:"
+                    f"## Source Image{'s' if num_fragments > 1 else ''}\n\n"
+                    f"Review the image{'s' if num_fragments > 1 else ''} below to verify and format the text:"
                 )
             else:
                 ocr_info = (
+                    f"{agent_instructions}"
                     f"## MyScript OCR Failed\n\n"
                     f"**Document:** {target_doc.VissibleName}\n"
                     f"**Page:** {page}/{total_pages}\n"
                     f"**Error:** {myscript_error or 'No text detected'}\n"
-                    f"**Image size:** {width}x{height}px (resized for Claude)\n\n"
+                    f"**Image size:** {width}x{height}px\n"
+                    f"**Fragments:** {num_fragments}\n\n"
                     f"---\n\n"
-                    f"## Image Fragments for Manual Recognition\n\n"
-                    f"Use the {fragments} image fragments below to recognize the text manually:"
+                    f"## Source Image{'s' if num_fragments > 1 else ''}\n\n"
+                    f"Manually recognize text from the image{'s' if num_fragments > 1 else ''} below:"
                 )
             
             response_items.append(TextContent(type="text", text=ocr_info))
             
-            # Add each fragment as EmbeddedResource
-            for i in range(fragments):
-                top = i * fragment_height
-                bottom = (i + 1) * fragment_height if i < fragments - 1 else height
-                fragment_img = img.crop((0, top, width, bottom))
-
-                # Convert to PNG bytes
+            # Add image(s) as EmbeddedResource
+            if num_fragments == 1:
+                # Single image - no splitting needed
                 buffer = BytesIO()
-                fragment_img.save(buffer, format="PNG", optimize=True)
-                fragment_bytes = buffer.getvalue()
-                fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
-
-                # Create EmbeddedResource
-                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                img.save(buffer, format="PNG", optimize=True)
+                img_bytes = buffer.getvalue()
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                
+                resource_uri = f"remarkableimg:///{uri_path}.page-{page}.png"
                 blob_resource = BlobResourceContents(
                     uri=resource_uri,
                     mimeType="image/png",
-                    blob=fragment_b64,
+                    blob=img_b64,
                 )
                 embedded = EmbeddedResource(type="resource", resource=blob_resource)
-                
-                # Add fragment label and image
-                fragment_label = TextContent(
-                    type="text",
-                    text=f"\n### Fragment {i+1}/{fragments} (y: {top}-{bottom}px)"
-                )
-                response_items.append(fragment_label)
                 response_items.append(embedded)
+            else:
+                # Split into fragments
+                fragment_height = height // num_fragments
+                
+                for i in range(num_fragments):
+                    top = i * fragment_height
+                    bottom = (i + 1) * fragment_height if i < num_fragments - 1 else height
+                    fragment_img = img.crop((0, top, width, bottom))
+
+                    # Convert to PNG bytes
+                    buffer = BytesIO()
+                    fragment_img.save(buffer, format="PNG", optimize=True)
+                    fragment_bytes = buffer.getvalue()
+                    fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
+
+                    # Create EmbeddedResource
+                    resource_uri = f"remarkableimg:///{uri_path}.page-{page}.fragment-{i+1}.png"
+                    blob_resource = BlobResourceContents(
+                        uri=resource_uri,
+                        mimeType="image/png",
+                        blob=fragment_b64,
+                    )
+                    embedded = EmbeddedResource(type="resource", resource=blob_resource)
+                    
+                    # Add fragment label and image
+                    fragment_label = TextContent(
+                        type="text",
+                        text=f"\n### Fragment {i+1}/{num_fragments}"
+                    )
+                    response_items.append(fragment_label)
+                    response_items.append(embedded)
 
             return response_items
 
