@@ -652,10 +652,56 @@ def _create_line_batches(lines: List[List[Dict]], batch_size: int = MYSCRIPT_BAT
     return batches
 
 
+def _recognize_batch(
+    client: MyScriptOCR,
+    batch: List[Dict],
+    batch_index: int,
+    width: int,
+    height: int,
+    language: LanguageCode,
+) -> tuple[int, Optional[str]]:
+    """
+    Recognize a single batch of strokes.
+    
+    Args:
+        client: MyScript client instance
+        batch: List of strokes to recognize
+        batch_index: Index of batch for ordering results
+        width, height: Document dimensions
+        language: OCR language
+    
+    Returns:
+        Tuple of (batch_index, recognized_text or None)
+    """
+    try:
+        stroke_groups = convert_rm_strokes_to_myscript(batch, time_offset=0)
+        
+        if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
+            return (batch_index, None)
+        
+        request = MyScriptRequest(
+            width=width,
+            height=height,
+            language=language,
+            stroke_groups=stroke_groups,
+        )
+        
+        result = client.recognize(request)
+        text = result.get("label", "")
+        return (batch_index, text.strip() if text else None)
+    except Exception:
+        return (batch_index, None)
+
+
+# Number of parallel threads for MyScript API calls
+MYSCRIPT_PARALLEL_THREADS = 7
+
+
 def ocr_rm_file_with_myscript(
     rm_data: bytes, 
     batch_size: int = MYSCRIPT_BATCH_SIZE,
     line_threshold: float = MYSCRIPT_LINE_THRESHOLD,
+    parallel_threads: int = MYSCRIPT_PARALLEL_THREADS,
 ) -> Optional[str]:
     """
     Recognize text from .rm file using MyScript.
@@ -665,15 +711,21 @@ def ocr_rm_file_with_myscript(
     
     Strokes are grouped by lines (based on Y-coordinate proximity) and
     batches are created to keep lines together for better OCR accuracy.
+    
+    Batches are processed in parallel (default: 7 threads) for speed,
+    then results are merged in the correct order.
 
     Args:
         rm_data: Contents of .rm file
         batch_size: Maximum strokes per API request (default: 500)
         line_threshold: Y-distance threshold to group strokes into lines (default: 30px)
+        parallel_threads: Number of parallel threads for API calls (default: 7)
 
     Returns:
         Recognized text or None on error
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
     try:
         # Parse .rm file
         parsed_data = parse_rm_file(rm_data)
@@ -695,7 +747,7 @@ def ocr_rm_file_with_myscript(
         # If strokes fit in one batch, use simple path
         if len(all_strokes_sorted) <= batch_size:
             stroke_groups = convert_rm_strokes_to_myscript(all_strokes_sorted, time_offset=0)
-
+            
             if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
                 return None
 
@@ -713,32 +765,35 @@ def ocr_rm_file_with_myscript(
         # Large page: create batches keeping lines together
         batches = _create_line_batches(lines, batch_size=batch_size)
         
+        if not batches:
+            return None
+        
+        # Process batches in parallel
         client = MyScriptOCR()
-        results = []
-
-        for batch in batches:
-            stroke_groups = convert_rm_strokes_to_myscript(batch, time_offset=0)
-
-            if not stroke_groups or not any(sg.strokes for sg in stroke_groups):
-                continue
-
-            request = MyScriptRequest(
-                width=width,
-                height=height,
-                language=language,
-                stroke_groups=stroke_groups,
-            )
-
-            try:
-                result = client.recognize(request)
-                text = result.get("label", "")
-                if text and text.strip():
-                    results.append(text.strip())
-            except Exception:
-                # Batch failed - continue with next batch
-                pass
-
-        return "\n".join(results) if results else None
+        results_dict: Dict[int, Optional[str]] = {}
+        
+        with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
+            # Submit all batches
+            futures = {
+                executor.submit(
+                    _recognize_batch, client, batch, idx, width, height, language
+                ): idx
+                for idx, batch in enumerate(batches)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                batch_idx, text = future.result()
+                results_dict[batch_idx] = text
+        
+        # Merge results in correct order
+        ordered_results = []
+        for idx in range(len(batches)):
+            text = results_dict.get(idx)
+            if text:
+                ordered_results.append(text)
+        
+        return "\n".join(ordered_results) if ordered_results else None
 
     except Exception:
         # MyScript error - return None to allow fallback

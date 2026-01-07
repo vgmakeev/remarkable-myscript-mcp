@@ -1481,9 +1481,15 @@ async def remarkable_image(
                     return [info, embedded]
             else:
                 # PNG format
+                import logging
+                logging.info(f"remarkable_image: rendering page {page} from {tmp_path}")
+                logging.info(f"remarkable_image: tmp_path exists={tmp_path.exists()}, size={tmp_path.stat().st_size if tmp_path.exists() else 0}")
+                
                 png_data = render_page_from_document_zip(
                     tmp_path, page, background_color=background
                 )
+                
+                logging.info(f"remarkable_image: png_data={len(png_data) if png_data else None}")
 
                 if png_data is None:
                     return make_error(
