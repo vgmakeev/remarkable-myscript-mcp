@@ -1595,3 +1595,382 @@ async def remarkable_image(
             message=str(e),
             suggestion="Check remarkable_status() to verify your connection.",
         )
+
+
+# Annotations for new tools
+IMAGE_FRAGMENTS_ANNOTATIONS = ToolAnnotations(
+    title="Get reMarkable Page as Image Fragments",
+    **_BASE_ANNOTATIONS,
+)
+
+OCR_COMBINED_ANNOTATIONS = ToolAnnotations(
+    title="Get reMarkable Page with MyScript OCR and Images",
+    **_BASE_ANNOTATIONS,
+)
+
+
+@mcp.tool(annotations=IMAGE_FRAGMENTS_ANNOTATIONS)
+async def remarkable_image_fragments(
+    document: str,
+    page: int = 1,
+    fragments: int = 4,
+    background: Optional[str] = None,
+    ctx: Optional[Context] = None,
+):
+    """
+    <usecase>Get a reMarkable page as multiple vertical image fragments for LLM recognition.</usecase>
+    <instructions>
+    Renders a notebook page and splits it into vertical fragments for easier recognition
+    by vision models. This is useful for:
+    - Long scrollable pages that don't fit well in a single image
+    - Better OCR accuracy by processing smaller chunks
+    - Parallel processing of page sections
+
+    Returns multiple base64-encoded PNG images that can be fed to vision models.
+
+    The page is split evenly into the specified number of fragments from top to bottom.
+    </instructions>
+    <parameters>
+    - document: Document name or path (use remarkable_browse to find documents)
+    - page: Page number (default: 1, 1-indexed)
+    - fragments: Number of vertical fragments to split into (default: 4, max: 10)
+    - background: Background color as hex code (default: "#FFFFFF" white)
+    </parameters>
+    <examples>
+    - remarkable_image_fragments("Meeting Notes")  # 4 fragments
+    - remarkable_image_fragments("Long Document", fragments=6)  # 6 fragments
+    - remarkable_image_fragments("Sketch", page=2, fragments=3)
+    </examples>
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        # Clamp fragments
+        fragments = max(2, min(10, fragments))
+
+        # Resolve background color
+        if background is None:
+            background = "#FFFFFF"
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        root = _get_root_path()
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
+        # Find document
+        documents = [item for item in collection if not item.is_folder]
+        target_doc = None
+        document_lower = actual_document.lower().strip("/")
+
+        for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            if not _is_within_root(doc_path, root):
+                continue
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            if doc_path.lower().strip("/") == document_lower:
+                target_doc = doc
+                break
+
+        if not target_doc:
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion=f"Try remarkable_browse(query='{document.split()[0]}') to search.",
+                did_you_mean=similar if similar else None,
+            )
+
+        # Download and render full page
+        raw_doc = client.download(target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            total_pages = get_document_page_count(tmp_path)
+
+            if page < 1 or page > total_pages:
+                return make_error(
+                    error_type="page_out_of_range",
+                    message=f"Page {page} does not exist. Document has {total_pages} page(s).",
+                    suggestion=f"Use page=1 to {total_pages} to view different pages.",
+                )
+
+            # Render full page as PNG
+            png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
+
+            if png_data is None:
+                return make_error(
+                    error_type="render_failed",
+                    message="Failed to render page to image.",
+                    suggestion="Make sure 'rmc' and 'cairosvg' are installed.",
+                )
+
+            # Split into fragments using PIL
+            img = PILImage.open(BytesIO(png_data))
+            width, height = img.size
+            fragment_height = height // fragments
+
+            fragment_data = []
+            for i in range(fragments):
+                top = i * fragment_height
+                bottom = (i + 1) * fragment_height if i < fragments - 1 else height
+                fragment_img = img.crop((0, top, width, bottom))
+
+                # Convert to PNG bytes
+                buffer = BytesIO()
+                fragment_img.save(buffer, format="PNG")
+                fragment_bytes = buffer.getvalue()
+                fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
+
+                fragment_data.append({
+                    "fragment": i + 1,
+                    "y_start": top,
+                    "y_end": bottom,
+                    "width": width,
+                    "height": bottom - top,
+                    "data_uri": f"data:image/png;base64,{fragment_b64}",
+                    "image_base64": fragment_b64,
+                })
+
+            result = {
+                "document": target_doc.VissibleName,
+                "page": page,
+                "total_pages": total_pages,
+                "full_width": width,
+                "full_height": height,
+                "fragment_count": fragments,
+                "fragments": fragment_data,
+            }
+
+            hint = (
+                f"Page {page}/{total_pages} split into {fragments} fragments. "
+                f"Full size: {width}x{height}px. "
+                "Feed fragments to vision model for recognition."
+            )
+
+            return make_response(result, hint)
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    except Exception as e:
+        return make_error(
+            error_type="image_fragments_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() to verify your connection.",
+        )
+
+
+@mcp.tool(annotations=OCR_COMBINED_ANNOTATIONS)
+async def remarkable_ocr_combined(
+    document: str,
+    page: int = 1,
+    fragments: int = 4,
+    background: Optional[str] = None,
+    ctx: Optional[Context] = None,
+):
+    """
+    <usecase>Get MyScript OCR text plus image fragments for human verification.</usecase>
+    <instructions>
+    Combines MyScript OCR with image fragments for best recognition results:
+    1. Extracts text using MyScript (high-quality vector-based OCR)
+    2. Renders page as image fragments for visual verification or LLM re-recognition
+
+    This allows you to:
+    - Get initial OCR text from MyScript (fast, works with vectors)
+    - Verify/improve OCR using vision model on the images
+    - Manually review ambiguous sections visually
+
+    Requires MyScript API keys (MYSCRIPT_APP_KEY, MYSCRIPT_HMAC_KEY).
+    </instructions>
+    <parameters>
+    - document: Document name or path
+    - page: Page number (default: 1)
+    - fragments: Number of image fragments (default: 4)
+    - background: Background color for images (default: "#FFFFFF")
+    </parameters>
+    <examples>
+    - remarkable_ocr_combined("Meeting Notes")
+    - remarkable_ocr_combined("Journal", page=3, fragments=6)
+    </examples>
+    """
+    try:
+        import zipfile
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        from remarkable_mcp.myscript import ocr_rm_file_with_myscript
+
+        # Clamp fragments
+        fragments = max(2, min(10, fragments))
+
+        if background is None:
+            background = "#FFFFFF"
+
+        client = get_rmapi()
+        collection = client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        root = _get_root_path()
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
+        # Find document
+        documents = [item for item in collection if not item.is_folder]
+        target_doc = None
+        document_lower = actual_document.lower().strip("/")
+
+        for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            if not _is_within_root(doc_path, root):
+                continue
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            if doc_path.lower().strip("/") == document_lower:
+                target_doc = doc
+                break
+
+        if not target_doc:
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion=f"Try remarkable_browse(query='{document.split()[0]}') to search.",
+                did_you_mean=similar if similar else None,
+            )
+
+        # Download document
+        raw_doc = client.download(target_doc)
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(raw_doc)
+            tmp_path = Path(tmp.name)
+
+        try:
+            total_pages = get_document_page_count(tmp_path)
+
+            if page < 1 or page > total_pages:
+                return make_error(
+                    error_type="page_out_of_range",
+                    message=f"Page {page} does not exist. Document has {total_pages} page(s).",
+                    suggestion=f"Use page=1 to {total_pages}.",
+                )
+
+            # Get .rm file for MyScript OCR
+            myscript_text = None
+            myscript_error = None
+
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                # Find page UUID from content file
+                content_file = None
+                for name in zf.namelist():
+                    if name.endswith(".content"):
+                        content_file = name
+                        break
+
+                if content_file:
+                    import json as json_lib
+                    content_data = json_lib.loads(zf.read(content_file))
+                    pages = content_data.get("cPages", {}).get("pages", [])
+
+                    if page <= len(pages):
+                        page_uuid = pages[page - 1].get("id")
+                        rm_filename = f"{page_uuid}.rm"
+
+                        # Find .rm file in zip
+                        for name in zf.namelist():
+                            if name.endswith(rm_filename):
+                                rm_data = zf.read(name)
+                                try:
+                                    myscript_text = ocr_rm_file_with_myscript(rm_data)
+                                except Exception as e:
+                                    myscript_error = str(e)
+                                break
+
+            # Render page as PNG and split into fragments
+            png_data = render_page_from_document_zip(tmp_path, page, background_color=background)
+
+            fragment_data = []
+            full_width = 0
+            full_height = 0
+
+            if png_data:
+                img = PILImage.open(BytesIO(png_data))
+                full_width, full_height = img.size
+                fragment_height = full_height // fragments
+
+                for i in range(fragments):
+                    top = i * fragment_height
+                    bottom = (i + 1) * fragment_height if i < fragments - 1 else full_height
+                    fragment_img = img.crop((0, top, full_width, bottom))
+
+                    buffer = BytesIO()
+                    fragment_img.save(buffer, format="PNG")
+                    fragment_bytes = buffer.getvalue()
+                    fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
+
+                    fragment_data.append({
+                        "fragment": i + 1,
+                        "y_start": top,
+                        "y_end": bottom,
+                        "width": full_width,
+                        "height": bottom - top,
+                        "data_uri": f"data:image/png;base64,{fragment_b64}",
+                        "image_base64": fragment_b64,
+                    })
+
+            result = {
+                "document": target_doc.VissibleName,
+                "page": page,
+                "total_pages": total_pages,
+                "myscript_ocr": {
+                    "text": myscript_text,
+                    "success": myscript_text is not None,
+                    "error": myscript_error,
+                },
+                "image": {
+                    "full_width": full_width,
+                    "full_height": full_height,
+                    "fragment_count": len(fragment_data),
+                    "fragments": fragment_data,
+                },
+            }
+
+            # Build hint
+            if myscript_text:
+                text_preview = myscript_text[:200] + "..." if len(myscript_text) > 200 else myscript_text
+                hint = (
+                    f"MyScript OCR extracted {len(myscript_text)} chars. "
+                    f"Also included {len(fragment_data)} image fragments for verification. "
+                    f"Preview: {text_preview}"
+                )
+            else:
+                hint = (
+                    f"MyScript OCR failed ({myscript_error or 'no text'}). "
+                    f"Use the {len(fragment_data)} image fragments for vision-based OCR."
+                )
+
+            return make_response(result, hint)
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    except Exception as e:
+        return make_error(
+            error_type="ocr_combined_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() and MyScript API keys.",
+        )

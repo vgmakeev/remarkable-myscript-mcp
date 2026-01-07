@@ -74,6 +74,8 @@ Access documents from your reMarkable tablet. All operations are read-only.
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
+- `remarkable_image_fragments(document, page, fragments)` - Get page as multiple vertical PNG fragments
+- `remarkable_ocr_combined(document, page, fragments)` - Get MyScript OCR + image fragments together
 
 ## Recommended Workflows
 
