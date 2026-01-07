@@ -403,30 +403,13 @@ def render_rm_file_to_png(
             from resvg_py import svg_to_bytes
 
             # resvg-py renders SVG to PNG directly
-            # Only pass width OR height to preserve aspect ratio (not both!)
-            # If we pass both, the image may be stretched/squashed
-            if bounds:
-                _, _, content_width, content_height = bounds
-                # Use the larger dimension to ensure full content is visible
-                if content_width >= content_height:
-                    png_data = svg_to_bytes(
-                        svg_path=str(tmp_svg_path),
-                        background=background_color,
-                        width=output_width,
-                    )
-                else:
-                    png_data = svg_to_bytes(
-                        svg_path=str(tmp_svg_path),
-                        background=background_color,
-                        height=output_height,
-                    )
-            else:
-                # No bounds - use width as default
-                png_data = svg_to_bytes(
-                    svg_path=str(tmp_svg_path),
-                    background=background_color,
-                    width=output_width,
-                )
+            # Only pass width to preserve aspect ratio - height will be calculated
+            # This works correctly for both standard pages and infinite scroll documents
+            png_data = svg_to_bytes(
+                svg_path=str(tmp_svg_path),
+                background=background_color,
+                width=output_width,
+            )
             return png_data
 
         except ImportError:
