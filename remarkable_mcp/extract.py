@@ -376,6 +376,14 @@ def render_rm_file_to_png(
             timeout=30,
         )
         if result.returncode != 0:
+            import logging
+            logging.warning(f"rmc failed for {rm_file_path}: {result.stderr.decode()}")
+            return None
+        
+        # Check if SVG was created and has content
+        if not tmp_svg_path.exists() or tmp_svg_path.stat().st_size == 0:
+            import logging
+            logging.warning(f"rmc produced empty SVG for {rm_file_path}")
             return None
 
         # Get content bounds from SVG
@@ -390,48 +398,18 @@ def render_rm_file_to_png(
             output_width = REMARKABLE_WIDTH
             output_height = REMARKABLE_HEIGHT
 
-        # Convert SVG to PNG
+        # Convert SVG to PNG using resvg-py (no system dependencies)
         try:
-            import cairosvg
-            from PIL import Image as PILImage
+            from resvg_py import svg_to_bytes
 
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_raw:
-                tmp_raw_path = Path(tmp_raw.name)
-
-            # Use cairosvg with background_color if specified
-            cairosvg.svg2png(
-                url=str(tmp_svg_path),
-                write_to=str(tmp_raw_path),
-                output_width=output_width,
-                output_height=output_height,
-                background_color=background_color,
+            # resvg-py renders SVG to PNG directly
+            png_data = svg_to_bytes(
+                svg_path=str(tmp_svg_path),
+                background=background_color,
+                width=output_width,
+                height=output_height,
             )
-
-            # If no background color specified (transparent), return as-is
-            if background_color is None:
-                with open(tmp_raw_path, "rb") as f:
-                    return f.read()
-
-            # If background color specified, ensure it's applied properly
-            img = PILImage.open(tmp_raw_path)
-            if img.mode == "RGBA" and background_color:
-                # Parse hex color (supports #RRGGBB and #RRGGBBAA formats)
-                r, g, b, a = _parse_hex_color(background_color)
-                # Create background and composite foreground on top
-                if a == 255:
-                    # Fully opaque background - convert to RGB
-                    bg = PILImage.new("RGB", img.size, (r, g, b))
-                    bg.paste(img, mask=img.split()[3])
-                    img = bg
-                elif a > 0:
-                    # Semi-transparent or transparent background
-                    bg = PILImage.new("RGBA", img.size, (r, g, b, a))
-                    img = PILImage.alpha_composite(bg, img)
-                # If a == 0 (fully transparent), return as-is
-            img.save(tmp_png_path)
-
-            with open(tmp_png_path, "rb") as f:
-                return f.read()
+            return png_data
 
         except ImportError:
             # Fall back to inkscape
@@ -666,14 +644,22 @@ def render_page_from_document_zip(
             zf.extractall(tmpdir_path)
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
+        
+        import logging
+        logging.info(f"Found {len(rm_files)} .rm files in {tmpdir_path}")
 
         # Validate page number
         if page < 1 or page > len(rm_files):
+            logging.warning(f"Page {page} out of range (1-{len(rm_files)})")
             return None
 
         # Render the requested page
         target_rm_file = rm_files[page - 1]
-        return render_rm_file_to_png(target_rm_file, background_color=background_color)
+        logging.info(f"Rendering page {page}: {target_rm_file}")
+        result = render_rm_file_to_png(target_rm_file, background_color=background_color)
+        if result is None:
+            logging.warning(f"render_rm_file_to_png returned None for {target_rm_file}")
+        return result
 
 
 def get_document_page_count(zip_path: Path) -> int:
