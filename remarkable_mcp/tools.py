@@ -1614,11 +1614,21 @@ OCR_COMBINED_ANNOTATIONS = ToolAnnotations(
     **_BASE_ANNOTATIONS,
 )
 
-# Optimal image size for Claude vision (max dimension)
-CLAUDE_VISION_MAX_SIZE = 1568
+# Image quality presets for Claude vision (max dimension in pixels)
+QUALITY_PRESETS = {
+    "low": 600,      # ~250 tokens, for quick preview
+    "normal": 1024,  # ~600 tokens, good balance (default)
+    "high": 1568,    # ~1200 tokens, max detail for small handwriting
+}
+CLAUDE_VISION_MAX_SIZE = QUALITY_PRESETS["normal"]  # Default
 
 # Height threshold for splitting (if taller than this after resize, split into fragments)
-SPLIT_HEIGHT_THRESHOLD = 2000
+SPLIT_HEIGHT_THRESHOLD = 1500  # Adjusted for smaller images
+
+
+def _get_max_size_for_quality(quality: str) -> int:
+    """Get max image dimension for quality preset."""
+    return QUALITY_PRESETS.get(quality.lower(), QUALITY_PRESETS["normal"])
 
 
 def _should_split_image(width: int, height: int) -> bool:
@@ -1686,6 +1696,7 @@ async def remarkable_image_fragments(
     document: str,
     page: int = 1,
     fragments: Optional[int] = None,
+    quality: str = "normal",
     background: Optional[str] = None,
     ctx: Optional[Context] = None,
 ):
@@ -1699,7 +1710,11 @@ async def remarkable_image_fragments(
     - Parallel processing of page sections
 
     Returns multiple EmbeddedResource images that Claude can see directly.
-    Images are resized to max 1568px (optimal for Claude vision).
+
+    Quality presets (token usage per fragment):
+    - "low": 600px max (~250 tokens) - quick preview
+    - "normal": 1024px max (~600 tokens) - good balance, default
+    - "high": 1568px max (~1200 tokens) - for small/detailed handwriting
 
     Smart splitting:
     - If fragments=None (default): auto-calculate based on page height
@@ -1710,11 +1725,12 @@ async def remarkable_image_fragments(
     - document: Document name or path (use remarkable_browse to find documents)
     - page: Page number (default: 1, 1-indexed)
     - fragments: Number of vertical fragments (default: auto based on height)
+    - quality: Image quality preset - "low", "normal" (default), "high"
     - background: Background color as hex code (default: "#FFFFFF" white)
     </parameters>
     <examples>
-    - remarkable_image_fragments("Meeting Notes")  # Auto fragments
-    - remarkable_image_fragments("Long Document", fragments=6)  # Force 6 fragments
+    - remarkable_image_fragments("Meeting Notes")  # Auto fragments, normal quality
+    - remarkable_image_fragments("Long Document", fragments=6, quality="high")
     - remarkable_image_fragments("Sketch", page=2)
     </examples>
     """
@@ -1790,7 +1806,8 @@ async def remarkable_image_fragments(
 
             # Load and resize image for Claude vision
             img = PILImage.open(BytesIO(png_data))
-            img = _resize_image_for_claude(img)
+            max_size = _get_max_size_for_quality(quality)
+            img = _resize_image_for_claude(img, max_size=max_size)
             width, height = img.size
 
             # Determine number of fragments
@@ -1889,6 +1906,7 @@ async def remarkable_image_fragments(
 async def remarkable_ocr_combined(
     document: str,
     page: int = 1,
+    quality: str = "normal",
     background: Optional[str] = None,
     ctx: Optional[Context] = None,
 ):
@@ -1903,19 +1921,24 @@ async def remarkable_ocr_combined(
     - Standard pages: single image (saves tokens)
     - Tall/infinite-scroll pages: auto-split into fragments
 
+    Quality presets (token usage):
+    - "low": 600px max (~250 tokens) - quick preview
+    - "normal": 1024px max (~600 tokens) - good balance, default
+    - "high": 1568px max (~1200 tokens) - for small/detailed handwriting
+
     Returns TextContent with OCR + instructions + EmbeddedResource image(s).
-    Images are resized to max 1568px (optimal for Claude vision).
 
     Requires MyScript API keys (MYSCRIPT_APP_KEY, MYSCRIPT_HMAC_KEY).
     </instructions>
     <parameters>
     - document: Document name or path
     - page: Page number (default: 1)
+    - quality: Image quality preset - "low", "normal" (default), "high"
     - background: Background color for images (default: "#FFFFFF")
     </parameters>
     <examples>
     - remarkable_ocr_combined("Meeting Notes")
-    - remarkable_ocr_combined("Journal", page=3)
+    - remarkable_ocr_combined("Journal", page=3, quality="high")
     </examples>
     """
     try:
@@ -2031,7 +2054,8 @@ async def remarkable_ocr_combined(
 
             # Load and resize image for Claude vision
             img = PILImage.open(BytesIO(png_data))
-            img = _resize_image_for_claude(img)
+            max_size = _get_max_size_for_quality(quality)
+            img = _resize_image_for_claude(img, max_size=max_size)
             width, height = img.size
 
             # Decide whether to split based on image dimensions
