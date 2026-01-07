@@ -398,6 +398,14 @@ def render_rm_file_to_png(
             output_width = REMARKABLE_WIDTH
             output_height = REMARKABLE_HEIGHT
 
+        # Ensure minimum width for readability (at least half of reMarkable width)
+        MIN_OUTPUT_WIDTH = REMARKABLE_WIDTH // 2  # 702px
+        if output_width < MIN_OUTPUT_WIDTH:
+            # Scale up to minimum width, preserving aspect ratio
+            scale = MIN_OUTPUT_WIDTH / output_width
+            output_width = MIN_OUTPUT_WIDTH
+            output_height = int(output_height * scale)
+
         # Convert SVG to PNG using resvg-py (no system dependencies)
         try:
             from resvg_py import svg_to_bytes

@@ -1662,11 +1662,14 @@ def _calculate_fragments(height: int, target_fragment_height: int = 1500) -> int
 
 def _resize_image_for_claude(img, max_size: int = CLAUDE_VISION_MAX_SIZE):
     """
-    Resize image to fit within max_size while preserving aspect ratio.
+    Resize image for Claude vision while preserving aspect ratio.
+    
+    For tall documents (infinite scroll), resize by width to ensure readability.
+    Height can be large - we'll split into fragments later.
     
     Args:
         img: PIL Image object
-        max_size: Maximum dimension (width or height)
+        max_size: Target width for the image
     
     Returns:
         Resized PIL Image (or original if already small enough)
@@ -1675,7 +1678,19 @@ def _resize_image_for_claude(img, max_size: int = CLAUDE_VISION_MAX_SIZE):
     
     width, height = img.size
     
-    # Check if resize is needed
+    # For tall documents (aspect ratio > 2), always resize by width
+    # This ensures the text is readable, and we'll split by height later
+    aspect_ratio = height / width if width > 0 else 1
+    
+    if aspect_ratio > 2:
+        # Infinite scroll document - resize by width only
+        if width <= max_size:
+            return img
+        new_width = max_size
+        new_height = int(height * max_size / width)
+        return img.resize((new_width, new_height), PILImage.Resampling.LANCZOS)
+    
+    # Standard page - fit within max_size x max_size
     if width <= max_size and height <= max_size:
         return img
     
